@@ -385,6 +385,9 @@ jobs:
 
     - name: Build teleop_ros2 image
       run: |
+        echo "github.workspace=${{ github.workspace }}"
+        pwd
+        ls -la .
         docker build -f examples/teleop_ros2/Dockerfile \
           --build-arg ROS_DISTRO=${{ env.ROS_DISTRO }} \
           --build-arg PYTHON_VERSION=${{ matrix.python_version }} \
