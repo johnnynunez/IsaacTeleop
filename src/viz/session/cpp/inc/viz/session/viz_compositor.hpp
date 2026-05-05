@@ -18,14 +18,9 @@ class DisplayBackend;
 class LayerBase;
 class VkContext;
 
-// VizCompositor: per-session GPU pipeline that runs one render pass
-// per frame. Drives a non-owning DisplayBackend for everything mode-
-// specific (target image, present, readback). Owns the per-frame
-// fence and the command pool / buffer.
-//
-// Lifetime: owned by VizSession. Created when the session moves from
-// kUninitialized to kReady (after the backend has been created and
-// initialized); destroyed when the session is destroyed.
+// One render pass per frame. Drives a non-owning DisplayBackend for
+// mode-specific work (target image, present, readback). Owns the
+// per-frame fence and command buffer; lifetime tied to VizSession.
 class VizCompositor
 {
 public:
@@ -44,20 +39,9 @@ public:
     VizCompositor(VizCompositor&&) = delete;
     VizCompositor& operator=(VizCompositor&&) = delete;
 
-    // Records and submits one frame.
-    //   1. backend.begin_frame() -> Frame (or skip).
-    //   2. Snapshot visible layers; compute per-layer tile rects from
-    //      their aspect_ratio() hints.
-    //   3. Begin render pass on backend.render_target(); pre-bind
-    //      scissor per layer (tile.outer); call layer->record() with
-    //      per-layer ViewInfo (viewport = tile.content).
-    //   4. End render pass; backend.record_post_render_pass() does
-    //      any blit / transition the backend needs.
-    //   5. Submit, waiting on layers' cuda_done_writing +
-    //      frame.wait_before_render, signaling frame.signal_after_render.
-    //   6. backend.end_frame() — present / xrEndFrame / no-op.
-    //   7. fence wait — synchronous frame (mailbox layers depend on
-    //      this — see quad_layer.hpp).
+    // Records and submits one frame. Synchronous (waits for GPU
+    // completion before returning). QuadLayer's mailbox depends on
+    // that — see quad_layer.hpp.
     void render(const std::vector<LayerBase*>& layers);
 
     // Forwards to backend; convenience for VizSession.
@@ -73,13 +57,9 @@ private:
     void create_command_pool();
     void create_command_buffer();
 
-    // vkQueueSubmit wrapper that recovers the fence if submit fails.
-    // After frame_sync_->reset(), the fence is unsignaled; if the real
-    // submit then fails, the next frame_sync_->wait() would deadlock
-    // forever on UINT64_MAX. On submit failure we attempt an empty
-    // no-op submit so the fence gets signaled, converting "silent
-    // hang" into "throw on next call" — the caller can then destroy +
-    // recreate the session.
+    // vkQueueSubmit wrapper. On failure, posts an empty submit so the
+    // fence still gets signaled — converts "silent deadlock on next
+    // wait" into "throw on next call".
     void submit_or_signal_fence(const VkSubmitInfo& info, const char* what);
 
     const VkContext* ctx_ = nullptr;

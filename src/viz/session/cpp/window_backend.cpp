@@ -56,25 +56,18 @@ WindowBackend::~WindowBackend()
 
 std::vector<std::string> WindowBackend::required_instance_extensions() const
 {
-    // GLFW reports the surface extensions for the current platform
-    // (VK_KHR_surface + the platform-specific one — xlib/wayland/win32).
-    // glfwInit must succeed before this query; GlfwWindow::create()
-    // refcounts init separately, but querying extensions doesn't
-    // require a window.
+    // glfwInit/Terminate around the query; GlfwWindow refcounts init
+    // separately for the actual window creation.
     if (glfwInit() != GLFW_TRUE)
     {
-        throw std::runtime_error(
-            "WindowBackend: glfwInit failed — no display available "
-            "for kWindow mode");
+        throw std::runtime_error("WindowBackend: glfwInit failed — no display available");
     }
     uint32_t count = 0;
     const char** raw = glfwGetRequiredInstanceExtensions(&count);
     if (raw == nullptr)
     {
         glfwTerminate();
-        throw std::runtime_error(
-            "WindowBackend: glfwGetRequiredInstanceExtensions returned null "
-            "(no Vulkan loader visible to GLFW)");
+        throw std::runtime_error("WindowBackend: no Vulkan loader visible to GLFW");
     }
     std::vector<std::string> out;
     out.reserve(count);
@@ -98,15 +91,10 @@ void WindowBackend::init(const VkContext& ctx, Resolution preferred_size)
     {
         window_ = GlfwWindow::create(ctx.instance(), preferred_size.width, preferred_size.height, config_.title);
         swapchain_ = Swapchain::create(ctx, window_->surface(), preferred_size);
-        // Match intermediate RT extent to the swapchain so the post-
-        // render blit is 1:1.
+        // Match intermediate extent to swapchain for a 1:1 post-render blit.
         render_target_ = RenderTarget::create(ctx, RenderTarget::Config{ swapchain_->extent() });
 
-        // Resolve the target fps. Config::target_fps overrides;
-        // otherwise we query the primary monitor's GLFW video mode.
-        // Final fallback is 60 — covers headless / virtual displays
-        // where refreshRate is reported as 0 or the query returns
-        // null.
+        // Pacer target: monitor refresh rate, falling back to 60.
         uint32_t fps = config_.target_fps;
         if (fps == 0)
         {
@@ -122,8 +110,6 @@ void WindowBackend::init(const VkContext& ctx, Resolution preferred_size)
             fps = 60;
         }
         frame_period_ = std::chrono::nanoseconds(1'000'000'000ULL / fps);
-        // Initialize deadline to "now" so the first frame doesn't
-        // sleep against a zero time_point.
         next_frame_deadline_ = std::chrono::steady_clock::now();
     }
     catch (...)
@@ -135,9 +121,7 @@ void WindowBackend::init(const VkContext& ctx, Resolution preferred_size)
 
 void WindowBackend::destroy()
 {
-    // Order matters: RT and swapchain hold device resources that must
-    // be torn down before the window's surface, which itself must
-    // outlive any swapchain ref. ctx is non-owning; leave alone.
+    // Order: RT + swapchain before the window (which owns the surface).
     render_target_.reset();
     swapchain_.reset();
     window_.reset();
@@ -151,20 +135,13 @@ std::optional<DisplayBackend::Frame> WindowBackend::begin_frame(int64_t /*predic
         return std::nullopt;
     }
 
-    // Frame pacer FIRST, before any work. Running pacer here (rather
-    // than end_frame) ensures it executes even when begin_frame
-    // returns nullopt (OUT_OF_DATE recovery, swapchain not ready).
-    // Without this, an OUT_OF_DATE → return nullopt path skips the
-    // pacer entirely and the application loop spins at hundreds of
-    // kHz until the swapchain recovers. sleep_until on a monotonic
-    // clock has ~1ms slop on Linux — well under our 16.67ms budget.
+    // Pacer first — runs once per loop iteration even when we return
+    // nullopt below; otherwise OUT_OF_DATE recovery spins.
     next_frame_deadline_ += frame_period_;
     const auto now = std::chrono::steady_clock::now();
     if (next_frame_deadline_ < now)
     {
-        // Fell behind (recreate took longer than the period).
-        // Reset the deadline so we don't accumulate debt.
-        next_frame_deadline_ = now;
+        next_frame_deadline_ = now; // fell behind; don't accumulate debt
     }
     else
     {
@@ -174,13 +151,7 @@ std::optional<DisplayBackend::Frame> WindowBackend::begin_frame(int64_t /*predic
     auto acquired = swapchain_->acquire_next_image();
     if (!acquired.has_value())
     {
-        // OUT_OF_DATE: swapchain unusable, must recreate immediately.
-        // No throttle here — without a working swapchain we can't
-        // render anything, and skipping the recreate leaves us in a
-        // spin loop until the throttle elapses. Holoviz/nvpro_core2
-        // both recreate per-event without throttling; with our
-        // RenderTarget::resize (keeps render pass) + oldSwapchain
-        // hint, per-event recreate is fast enough.
+        // OUT_OF_DATE: swapchain unusable, recreate now.
         resize(Resolution{});
         return std::nullopt;
     }
@@ -192,14 +163,6 @@ std::optional<DisplayBackend::Frame> WindowBackend::begin_frame(int64_t /*predic
     f.wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     f.signal_after_render = acquired->render_done;
     f.backend_token = static_cast<uint64_t>(acquired->image_index);
-    // Stash the swapchain image too — record_post_render_pass needs
-    // it. Pack into a higher-bit slot of backend_token's payload:
-    // the AcquiredImage's `image` lives only as long as the swapchain
-    // doesn't recreate, which it can't between begin and end_frame
-    // (the trailing fence wait gates it). So we just look it up by
-    // index in record_post_render_pass via a fresh acquire query.
-    // Simpler: also stash the VkImage as a side cache on the backend.
-    // (See pending_blit_image_ if added; for now we re-query by index.)
     return f;
 }
 
@@ -219,11 +182,6 @@ void WindowBackend::record_post_render_pass(VkCommandBuffer cmd, const Frame& fr
         return;
     }
     const uint32_t image_index = static_cast<uint32_t>(frame.backend_token);
-    // Look up the swapchain image directly — Swapchain doesn't
-    // currently expose images_ by index, but we know the image_index
-    // fits in [0, image_count). Add an accessor for clarity.
-    // (Falls back to UNDEFINED layout transition if Swapchain
-    // exposes nothing — bug; see Swapchain::image(uint32_t).)
     const VkImage swap_image = swapchain_->image_at(image_index);
 
     transition_image(cmd, swap_image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
@@ -255,8 +213,7 @@ void WindowBackend::end_frame(const Frame& frame)
         return;
     }
     const uint32_t image_index = static_cast<uint32_t>(frame.backend_token);
-    // Out-of-date returns false; the next frame's begin_frame() will
-    // observe it and force-recreate. Pacing happens at begin_frame.
+    // Out-of-date returns false; next begin_frame catches it and recreates.
     (void)swapchain_->present(image_index, frame.signal_after_render);
 }
 
@@ -280,8 +237,8 @@ bool WindowBackend::consume_resized()
 
 void WindowBackend::resize(Resolution /*hint*/)
 {
-    // Backend is the source of truth for the target size — query the
-    // window directly instead of trusting the caller.
+    // Backend reads its own target size from the window — the caller's
+    // hint is ignored.
     if (swapchain_ == nullptr || ctx_ == nullptr || window_ == nullptr || render_target_ == nullptr)
     {
         return;
@@ -289,23 +246,13 @@ void WindowBackend::resize(Resolution /*hint*/)
     const Resolution target = window_->framebuffer_size();
     if (target.width == 0 || target.height == 0)
     {
-        // Window minimized — defer until un-minimized.
-        return;
+        return; // minimized
     }
     const Resolution current = swapchain_->extent();
     if (target.width == current.width && target.height == current.height)
     {
         return;
     }
-
-    // No throttle — both Holoviz and nvpro_core2 recreate per resize
-    // event without throttling, and our optimized recreate path
-    // (Swapchain::recreate uses oldSwapchain to recycle driver
-    // resources; RenderTarget::resize keeps the render pass alive
-    // and rebuilds only color/depth+framebuffer) is fast enough that
-    // per-event recreate during drag holds an acceptable framerate
-    // without producing the OUT_OF_DATE spin-loops that throttling
-    // creates.
     swapchain_->recreate(target);
     render_target_->resize(swapchain_->extent());
 }

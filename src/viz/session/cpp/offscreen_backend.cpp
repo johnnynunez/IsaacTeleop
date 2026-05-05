@@ -81,10 +81,8 @@ std::optional<DisplayBackend::Frame> OffscreenBackend::begin_frame(int64_t /*pre
         return std::nullopt;
     }
     Frame f{};
-    // Single identity view covering the full intermediate RT. The
-    // compositor overrides viewport per-layer via tile_layout —
-    // offscreen "tile" is the full framebuffer (single layer fills
-    // it; multiple layers tile too but readback only sees the union).
+    // Single identity view; compositor overrides viewport per-layer
+    // via tile_layout.
     f.views.assign(1, ViewInfo{});
     f.views[0].viewport = Rect2D{ 0, 0, extent_.width, extent_.height };
     return f;
@@ -111,9 +109,7 @@ HostImage OffscreenBackend::readback_to_host()
         throw std::runtime_error("OffscreenBackend::readback_to_host: backend not initialized");
     }
 
-    // Reuse the pre-allocated command buffer + staging buffer. The
-    // intermediate RT was left in TRANSFER_SRC_OPTIMAL by the render
-    // pass's final layout transition.
+    // RT is in TRANSFER_SRC_OPTIMAL from the render pass's final layout.
     check_vk(vkResetCommandBuffer(readback_command_buffer_, 0), "vkResetCommandBuffer(readback)");
 
     VkCommandBufferBeginInfo begin{};
@@ -171,8 +167,7 @@ void OffscreenBackend::create_readback_staging()
     check_vk(vkBindBufferMemory(ctx_->device(), readback_buffer_, readback_memory_, 0),
              "vkBindBufferMemory(readback)");
 
-    // Dedicated cmd pool/buffer for the readback path so it can never
-    // collide with the compositor's per-frame buffer.
+    // Dedicated cmd pool — never races the compositor's per-frame buffer.
     VkCommandPoolCreateInfo pi{};
     pi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;

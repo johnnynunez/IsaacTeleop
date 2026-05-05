@@ -1,13 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// window_smoke: minimal Televiz kWindow demo. Opens a 1024x768 GLFW
-// window, fills four QuadLayers with solid RGBA patterns, tiles them
-// in a 2x2 aspect-preserving grid, runs the render loop until the
-// window is closed.
-//
-// Mirrors the camera_streamer monitor mode (HolovizOp tiling) on a
-// Holoscan-free path. No Holoscan, no HoloHub, no GXF.
+// Minimal kWindow demo: opens a 1024x768 GLFW window, fills four
+// QuadLayers with solid RGBA patterns tiled 2x2, runs the render
+// loop until the window closes.
 
 #include <viz/core/vk_context.hpp>
 #include <viz/layers/quad_layer.hpp>

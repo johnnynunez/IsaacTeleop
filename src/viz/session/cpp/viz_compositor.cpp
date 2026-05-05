@@ -124,15 +124,12 @@ void VizCompositor::submit_or_signal_fence(const VkSubmitInfo& info, const char*
 
 void VizCompositor::render(const std::vector<LayerBase*>& layers)
 {
-    // Wait for the previous frame's GPU work to complete before reusing
-    // the command buffer / fence (1 frame in flight).
+    // Wait for previous frame (1 frame in flight).
     frame_sync_->wait();
 
-    // Snapshot the visible-layer set ONCE per frame. is_visible() is
-    // an atomic flag; sampling it twice across record / wait-collect
-    // would let a mid-frame toggle record draws but skip the matching
-    // cuda_done_writing wait (or vice versa), which would race the
-    // producer's CUDA copy.
+    // Snapshot visible layers ONCE — is_visible() is atomic; reading
+    // it twice could record a draw without the matching wait (or vice
+    // versa) and race the producer's CUDA copy.
     std::vector<LayerBase*> visible_layers;
     visible_layers.reserve(layers.size());
     for (LayerBase* layer : layers)
@@ -146,18 +143,14 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
     auto frame = backend_->begin_frame(/*predicted_display_time=*/0);
     if (!frame.has_value())
     {
-        // Backend says skip (out-of-date swapchain, XR shouldRender=
-        // false, etc.). frame_sync_ stays signaled from the wait()
-        // above; the next render() doesn't deadlock.
+        // Backend skipped this frame; fence stays signaled, next call won't deadlock.
         return;
     }
 
     const RenderTarget& rt = backend_->render_target();
     const Resolution rt_extent = rt.resolution();
 
-    // Per-layer aspect-fit tiles. nullopt aspect = fill the tile.
-    // tile_layout(...) is a no-op for empty visible_layers (returns
-    // empty vector), so the loop below safely skips.
+    // Per-layer aspect-fit tiles; nullopt aspect = fill the tile.
     std::vector<TileSlot> tiles;
     if (!visible_layers.empty())
     {
@@ -193,8 +186,8 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
 
     vkCmdBeginRenderPass(command_buffer_, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
-    // Per-layer dispatch. Pre-bind scissor (tile.outer); pass per-
-    // layer ViewInfo with viewport = tile.content.
+    // Per-layer: pre-bind scissor (tile.outer); per-layer ViewInfo
+    // gets viewport = tile.content.
     for (size_t i = 0; i < visible_layers.size(); ++i)
     {
         const VkRect2D scissor_rect = tiles[i].outer;
@@ -212,8 +205,7 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
 
     vkCmdEndRenderPass(command_buffer_);
 
-    // Backend-specific post-render-pass commands (kWindow blit +
-    // present transitions; kOffscreen no-op).
+    // Backend-specific post-render commands (blit + transitions etc.).
     backend_->record_post_render_pass(command_buffer_, *frame);
 
     check_vk(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer");
@@ -223,10 +215,8 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
     // previous frame and the next render() doesn't deadlock.
     frame_sync_->reset();
 
-    // Layer wait semaphores (cuda_done_writing) + the backend's
-    // wait_before_render. Layer wait values are timeline; backend
-    // semaphores are binary (value ignored in
-    // VkTimelineSemaphoreSubmitInfo).
+    // Layer waits (timeline) + backend's wait_before_render (binary,
+    // value 0 ignored).
     std::vector<VkSemaphore> wait_semaphores;
     std::vector<uint64_t> wait_values;
     std::vector<VkPipelineStageFlags> wait_stages;
@@ -276,13 +266,10 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
     submit.pSignalSemaphores = signal_semaphores.empty() ? nullptr : signal_semaphores.data();
     submit_or_signal_fence(submit, "vkQueueSubmit");
 
-    // Backend present / xrEndFrame / no-op.
     backend_->end_frame(*frame);
 
-    // Wait for completion before returning so readback / next frame
-    // sees a consistent state. With 1 frame in flight this is the
-    // natural synchronization point. QuadLayer's mailbox depends on
-    // this — see quad_layer.hpp.
+    // Drain before returning. QuadLayer's mailbox relies on this
+    // synchronous-frame contract — see quad_layer.hpp.
     frame_sync_->wait();
 }
 

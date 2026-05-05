@@ -1,9 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// GPU + display tests for GlfwWindow, Swapchain, and the VizSession
-// kWindow render loop. Skip cleanly when no display is available
-// (CI without Xvfb, headless containers).
+// [gpu][window] tests for GlfwWindow, Swapchain, and the VizSession
+// kWindow render loop. Skip cleanly without a display.
 
 #include "test_helpers.hpp"
 
@@ -37,9 +36,7 @@ using viz::testing::is_gpu_available;
 namespace
 {
 
-// True iff GLFW can init AND a Vulkan-capable display is reachable.
-// Cached after the first call so the GLFW init/terminate isn't paid
-// per-test.
+// True iff GLFW init succeeds and a Vulkan-capable display is reachable.
 bool window_environment_available()
 {
     static const bool cached = []() -> bool
@@ -55,8 +52,6 @@ bool window_environment_available()
     return cached;
 }
 
-// Build the GLFW-required extension list so the VkContext can satisfy
-// glfwCreateWindowSurface().
 std::vector<std::string> glfw_required_instance_extensions()
 {
     if (glfwInit() != GLFW_TRUE)

@@ -171,11 +171,9 @@ private:
     std::unique_ptr<VkContext> owned_ctx_;
     VkContext* ctx_ptr_ = nullptr;
 
-    // The display backend (one per session, picked from config_.mode
-    // at init). Owns mode-specific resources (window + swapchain in
-    // kWindow, readback staging in kOffscreen, OpenXR session in M5).
-    // Must outlive compositor_ (compositor holds a non-owning ref)
-    // and is destroyed before the VkContext.
+    // Display backend (picked from config_.mode at init). Owns mode-
+    // specific resources. Must outlive compositor_ (compositor holds
+    // a non-owning ref) and is destroyed before the VkContext.
     std::unique_ptr<DisplayBackend> backend_;
 
     std::unique_ptr<VizCompositor> compositor_;

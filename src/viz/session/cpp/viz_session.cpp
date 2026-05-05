@@ -16,7 +16,6 @@ namespace
 {
 
 // Factory: instantiate the backend matching the requested mode.
-// kXr is rejected here until the M5 XR backend lands.
 std::unique_ptr<DisplayBackend> make_backend(const VizSession::Config& cfg)
 {
     switch (cfg.mode)
@@ -32,7 +31,7 @@ std::unique_ptr<DisplayBackend> make_backend(const VizSession::Config& cfg)
         return std::make_unique<WindowBackend>(wc);
     }
     case DisplayMode::kXr:
-        throw std::runtime_error("VizSession: kXr is not implemented (XR backend ships in M5)");
+        throw std::runtime_error("VizSession: kXr is not yet implemented");
     }
     throw std::runtime_error("VizSession: unknown DisplayMode");
 }
@@ -61,19 +60,16 @@ VizSession::~VizSession()
 
 void VizSession::init()
 {
-    // Build the backend FIRST — it knows which Vulkan extensions to
-    // ask for. Reject unsupported modes before any Vulkan work.
+    // Backend first — it dictates the required Vulkan extensions and
+    // rejects unsupported modes before any Vulkan work.
     backend_ = make_backend(config_);
 
     try
     {
-        // Build the VkContext config from the backend's required
-        // extensions plus any caller-provided extras.
         VkContext::Config vk_cfg{};
         vk_cfg.instance_extensions = backend_->required_instance_extensions();
         vk_cfg.device_extensions = backend_->required_device_extensions();
 
-        // Acquire / create the Vulkan context.
         if (config_.external_context != nullptr)
         {
             if (!config_.external_context->is_initialized())
@@ -89,8 +85,6 @@ void VizSession::init()
             ctx_ptr_ = owned_ctx_.get();
         }
 
-        // Backend allocates its mode-specific resources (intermediate
-        // RT, swapchain, readback staging, etc.).
         backend_->init(*ctx_ptr_, Resolution{ config_.window_width, config_.window_height });
 
         VizCompositor::Config c_cfg{};
@@ -110,8 +104,7 @@ void VizSession::init()
 void VizSession::destroy()
 {
     layers_.clear();
-    // Order: compositor (non-owning ref to backend) first, then the
-    // backend (holds device resources), then the context.
+    // Order: compositor (holds backend ref) -> backend -> context.
     compositor_.reset();
     backend_.reset();
     if (owned_ctx_)
@@ -166,10 +159,8 @@ FrameInfo VizSession::begin_frame()
     current_frame_info_.predicted_display_time = 0; // XR-only; 0 in offscreen
     current_frame_info_.should_render = (state_ == SessionState::kRunning);
     current_frame_info_.resolution = compositor_ ? compositor_->resolution() : Resolution{};
-    // Backend-built per-view info ships with the next frame; the
-    // public FrameInfo carries a single identity entry as a hint to
-    // application code (real per-eye XR views are populated inside
-    // the compositor's render loop in M5).
+    // Public FrameInfo carries a single identity entry as a hint;
+    // backends populate the actual per-view info inside render().
     current_frame_info_.views.assign(1, ViewInfo{});
 
     frame_in_progress_ = true;
@@ -220,9 +211,7 @@ FrameInfo VizSession::render()
         backend_->poll_events();
         if (backend_->consume_resized())
         {
-            // Backend queries its own window framebuffer for the new
-            // size; the hint is ignored. Keeping the parameter on the
-            // interface for backends that prefer caller-driven sizing.
+            // Hint ignored — backend reads its own framebuffer size.
             backend_->resize(Resolution{});
         }
     }

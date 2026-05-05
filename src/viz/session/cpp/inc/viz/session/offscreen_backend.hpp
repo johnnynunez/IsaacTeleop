@@ -10,10 +10,8 @@
 namespace viz
 {
 
-// kOffscreen backend: layers render into an intermediate RenderTarget
-// and the result is read back to host memory on demand. No present,
-// no events. Used by tests and by callers that consume frames as
-// numpy/host arrays (CI, debug tooling).
+// Renders into an intermediate RT; readback_to_host copies it to a
+// host-visible buffer on demand. No present, no events.
 class OffscreenBackend final : public DisplayBackend
 {
 public:
@@ -27,8 +25,7 @@ public:
 
     Resolution current_extent() const override;
 
-    // Allocates a tightly-packed RGBA8 host buffer and copies the
-    // intermediate RT's color attachment into it. Synchronous.
+    // Synchronous tightly-packed RGBA8 copy of the RT's color attachment.
     HostImage readback_to_host() override;
 
     void destroy();
@@ -41,14 +38,12 @@ private:
     Resolution extent_{};
     std::unique_ptr<RenderTarget> render_target_;
 
-    // Pre-allocated host-visible staging buffer reused per readback.
+    // Pre-allocated; reused per readback.
     VkBuffer readback_buffer_ = VK_NULL_HANDLE;
     VkDeviceMemory readback_memory_ = VK_NULL_HANDLE;
     VkDeviceSize readback_byte_size_ = 0;
 
-    // Per-call command pool/buffer for the readback copy. Separate
-    // from the compositor's command buffer so readback never races
-    // the per-frame command buffer recording.
+    // Dedicated cmd buffer so readback never races the compositor's.
     VkCommandPool readback_command_pool_ = VK_NULL_HANDLE;
     VkCommandBuffer readback_command_buffer_ = VK_NULL_HANDLE;
 };

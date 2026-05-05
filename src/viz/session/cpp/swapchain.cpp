@@ -152,15 +152,8 @@ void Swapchain::init(Resolution preferred_size, VkSwapchainKHR old_swapchain)
         info.preTransform = caps.currentTransform;
         info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 
-        // Prefer MAILBOX over FIFO. FIFO pins the surface for vblank,
-        // which on NVIDIA Linux + Wayland contends with the desktop
-        // compositor and causes system-wide UI lag. MAILBOX decouples
-        // the present queue from vblank — the WSI replaces a pending
-        // image when a newer one is presented. The application is
-        // expected to throttle its own render rate separately
-        // (WindowBackend's frame pacer) so MAILBOX doesn't peg the
-        // GPU at 100% on a fast device. FIFO is the universal fallback
-        // when MAILBOX isn't supported.
+        // Prefer MAILBOX (no compositor sync stalls); FIFO is the
+        // universal fallback. App throttles its own render rate.
         VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
         uint32_t pm_count = 0;
         vkGetPhysicalDeviceSurfacePresentModesKHR(phys, surface_, &pm_count, nullptr);
@@ -252,9 +245,7 @@ void Swapchain::destroy_swapchain_only()
     const VkDevice device = ctx_->device();
     if (device != VK_NULL_HANDLE)
     {
-        // Drain pending GPU work before tearing the swapchain down so
-        // semaphores aren't destroyed while the queue still references
-        // them.
+        // Drain so we don't destroy semaphores still referenced by the queue.
         (void)vkDeviceWaitIdle(device);
     }
     destroy_semaphores();
@@ -279,21 +270,16 @@ void Swapchain::recreate(Resolution preferred_size)
 {
     if (swapchain_ == VK_NULL_HANDLE)
     {
-        // Nothing to retire — fresh init.
         init(preferred_size);
         return;
     }
 
     const VkDevice device = ctx_->device();
-    // Drain pending GPU work before recreate so per-image semaphores
-    // aren't destroyed mid-use. The driver also requires this for
-    // swapchains in flight.
     (void)vkDeviceWaitIdle(device);
 
-    // Save the old handle. Tear down the supporting state (semaphores,
-    // image vector) but NOT the old swapchain itself — we hand it to
-    // the new vkCreateSwapchainKHR call as oldSwapchain so the driver
-    // can recycle internal resources.
+    // Hand the old swapchain to vkCreateSwapchainKHR via oldSwapchain
+    // so the driver can recycle resources. Keep the old handle alive
+    // until init() succeeds; destroy it after.
     VkSwapchainKHR old = swapchain_;
     swapchain_ = VK_NULL_HANDLE;
     destroy_semaphores();
@@ -307,8 +293,6 @@ void Swapchain::recreate(Resolution preferred_size)
     }
     catch (...)
     {
-        // init may or may not have consumed the old handle. If a new
-        // swapchain wasn't created, the old still exists — destroy it.
         if (old != VK_NULL_HANDLE)
         {
             vkDestroySwapchainKHR(device, old, nullptr);
@@ -331,12 +315,8 @@ std::optional<Swapchain::AcquiredImage> Swapchain::acquire_next_image()
     uint32_t image_index = 0;
     const VkResult r =
         vkAcquireNextImageKHR(ctx_->device(), swapchain_, UINT64_MAX, sem, VK_NULL_HANDLE, &image_index);
-    // OUT_OF_DATE: swapchain unusable, no image acquired -> caller
-    // must recreate. SUBOPTIMAL: image IS acquired and the semaphore
-    // signaled; the swapchain just isn't optimal for the current
-    // surface (e.g., size drifted mid-resize). We pass it through and
-    // let the WSI scale-on-present — much smoother than dropping
-    // frames during a continuous drag.
+    // OUT_OF_DATE: caller must recreate. SUBOPTIMAL: image is valid,
+    // pass it through and let the WSI scale on present.
     if (r == VK_ERROR_OUT_OF_DATE_KHR)
     {
         return std::nullopt;
@@ -362,16 +342,11 @@ bool Swapchain::present(uint32_t image_index, VkSemaphore render_done)
     info.pSwapchains = &swapchain_;
     info.pImageIndices = &image_index;
     const VkResult r = vkQueuePresentKHR(ctx_->queue(), &info);
-    // Advance the frame slot regardless of result — semaphores are
-    // per-slot and we want the next frame to use a fresh pair.
+    // Advance the slot regardless — next frame needs fresh semaphores.
     if (!images_.empty())
     {
         frame_slot_ = (frame_slot_ + 1) % static_cast<uint32_t>(images_.size());
     }
-    // Same SUBOPTIMAL handling as acquire — the present succeeded,
-    // the swapchain is just sub-optimal for the current surface.
-    // Treat it as success; caller can rely on its own size-check
-    // logic to schedule a recreate.
     if (r == VK_ERROR_OUT_OF_DATE_KHR)
     {
         return false;

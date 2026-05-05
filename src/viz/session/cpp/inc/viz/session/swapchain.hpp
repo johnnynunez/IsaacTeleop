@@ -16,19 +16,9 @@ namespace viz
 
 class VkContext;
 
-// Owns a VkSwapchainKHR + its per-image semaphores.
-//
-// VizCompositor's kWindow path drives this:
-//   1. acquire_next_image() at frame start → image index + sema to
-//      wait on (signaled by the WSI when the image is reusable).
-//   2. record commands that blit the intermediate framebuffer to
-//      images[index], then transition to PRESENT_SRC.
-//   3. queueSubmit waits on image_available, signals render_done.
-//   4. present(index, render_done) flips the image to display.
-//
-// Present mode is hardcoded VK_PRESENT_MODE_FIFO_KHR (vsync). Surface
-// format chosen per common-case preference: B8G8R8A8_SRGB > anything-
-// else-SRGB > the runtime's first format.
+// VkSwapchainKHR + per-image semaphores. Prefers MAILBOX present
+// mode, falls back to FIFO. Surface format prefers B8G8R8A8_SRGB
+// then any *_SRGB then the runtime's first.
 class Swapchain
 {
 public:
@@ -42,12 +32,10 @@ public:
     Swapchain(Swapchain&&) = delete;
     Swapchain& operator=(Swapchain&&) = delete;
 
-    // Acquire the next presentable image. Returns std::nullopt if the
-    // swapchain is out-of-date or suboptimal — caller must recreate()
-    // before retrying. Both semaphores are owned by Swapchain; the
-    // caller waits on image_available before writing the swapchain
-    // image (TRANSFER_DST blit) and signals render_done when done so
-    // present() can wait on it.
+    // Caller waits on image_available before TRANSFER_DST writes,
+    // signals render_done when done. Both semaphores are owned by
+    // Swapchain. nullopt only on OUT_OF_DATE; SUBOPTIMAL returns the
+    // image and lets the WSI scale on present.
     struct AcquiredImage
     {
         uint32_t image_index;
@@ -57,13 +45,11 @@ public:
     };
     std::optional<AcquiredImage> acquire_next_image();
 
-    // Submit the image for present, waiting on render_done first.
-    // Returns false on out-of-date / suboptimal — caller must
-    // recreate() before the next frame.
+    // Returns false on OUT_OF_DATE; SUBOPTIMAL is reported as success.
     bool present(uint32_t image_index, VkSemaphore render_done);
 
-    // Tear down + recreate at the requested extent. Used on window
-    // resize and on out-of-date errors. Drains the device first.
+    // Drain + recreate at the requested extent. Passes the old handle
+    // via oldSwapchain so the driver recycles internal resources.
     void recreate(Resolution preferred_size);
 
     Resolution extent() const noexcept
@@ -82,10 +68,7 @@ public:
     {
         return static_cast<uint32_t>(images_.size());
     }
-    // Indexed accessor for the swapchain's images. Caller passes the
-    // image_index returned by acquire_next_image() to look up the
-    // matching VkImage for blits / barriers. Returns VK_NULL_HANDLE
-    // if the index is out of range.
+    // Look up a swapchain image by acquired index; VK_NULL_HANDLE if out of range.
     VkImage image_at(uint32_t index) const noexcept
     {
         return index < images_.size() ? images_[index] : VK_NULL_HANDLE;
@@ -94,11 +77,9 @@ public:
 private:
     Swapchain(const VkContext& ctx, VkSurfaceKHR surface);
     // old_swapchain is passed as VkSwapchainCreateInfoKHR::oldSwapchain
-    // so the driver can retire the old swapchain's resources gracefully
-    // (much faster than a full destroy/create). VK_NULL_HANDLE on first
-    // create.
+    // so the driver recycles resources. VK_NULL_HANDLE on first create.
     void init(Resolution preferred_size, VkSwapchainKHR old_swapchain = VK_NULL_HANDLE);
-    void destroy_swapchain_only(); // teardown without releasing the surface
+    void destroy_swapchain_only();
     void create_semaphores();
     void destroy_semaphores();
 
@@ -110,9 +91,8 @@ private:
     VkExtent2D extent_{};
     std::vector<VkImage> images_; // not owned (swapchain owns)
 
-    // Per-frame ring of acquire/render semaphores. We keep one slot per
-    // swapchain image to avoid an in-flight image trying to reuse a
-    // semaphore another in-flight image is still consuming.
+    // Per-image-slot semaphore ring so an in-flight image never tries
+    // to reuse a semaphore another in-flight image still consumes.
     std::vector<VkSemaphore> image_available_;
     std::vector<VkSemaphore> render_done_;
     uint32_t frame_slot_ = 0;

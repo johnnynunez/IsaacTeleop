@@ -42,12 +42,10 @@ TEST_CASE("SessionState enum exposes the full lifecycle set", "[unit][viz_sessio
     CHECK(static_cast<int>(SessionState::kDestroyed) == 5);
 }
 
-TEST_CASE("VizSession::create rejects kXr until the XR backend ships", "[unit][viz_session]")
+TEST_CASE("VizSession::create rejects kXr (not yet implemented)", "[unit][viz_session]")
 {
-    // Mode validation must happen before any Vulkan work — verified by
-    // not requiring a GPU here. kXr throws until the M5 XR backend
-    // lands. (kWindow is now wired and validated end-to-end in the
-    // [gpu][window] tests.)
+    // Mode validation must happen before any Vulkan work — verified
+    // by not requiring a GPU here.
     VizSession::Config cfg_xr{};
     cfg_xr.mode = DisplayMode::kXr;
     CHECK_THROWS_AS(VizSession::create(cfg_xr), std::runtime_error);

@@ -95,12 +95,9 @@ public:
         return resolution_;
     }
 
-    // Recreate color/depth images + framebuffer at new_size. KEEPS the
-    // render pass — its compatibility doesn't depend on extent, so
-    // pipelines built against this RT's render_pass() stay valid. The
-    // caller must vkDeviceWaitIdle (or otherwise gate on retired GPU
-    // work) before invoking this; resize destroys the underlying
-    // images.
+    // Recreate color/depth/framebuffer at new_size. Keeps the render
+    // pass alive; pipelines built against it stay valid. Caller must
+    // ensure GPU work is retired (vkDeviceWaitIdle / fence wait).
     void resize(Resolution new_size);
 
 private:

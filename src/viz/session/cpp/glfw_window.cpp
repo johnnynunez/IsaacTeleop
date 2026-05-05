@@ -17,9 +17,8 @@ namespace viz
 namespace
 {
 
-// Process-wide GLFW init refcount. glfwInit / glfwTerminate must be
-// balanced; we call them once per process regardless of how many
-// GlfwWindows exist concurrently.
+// Process-wide refcount so glfwInit/Terminate stay balanced across
+// concurrent GlfwWindows.
 std::mutex& glfw_init_mutex()
 {
     static std::mutex m;
@@ -76,7 +75,7 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(VkInstance instance, uint32_t wid
 
     retain_glfw();
 
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // We're using Vulkan, not GL.
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Vulkan, not GL
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
     GLFWwindow* w = glfwCreateWindow(static_cast<int>(width), static_cast<int>(height), title.c_str(), nullptr, nullptr);
