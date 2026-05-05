@@ -194,6 +194,14 @@ if(BUILD_VIZ)
     set(GLFW_BUILD_TESTS OFF CACHE BOOL "Skip GLFW tests" FORCE)
     set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "Skip GLFW examples" FORCE)
     set(GLFW_INSTALL OFF CACHE BOOL "Skip GLFW install target" FORCE)
+    # X11-only by default. GLFW 3.4 defaults Wayland ON on Linux but
+    # the build needs wayland-scanner + libwayland-dev present at
+    # configure time, which CI runners and minimal containers often
+    # lack. Matches nvpro_core2's pragmatism (third_party/CMakeLists.txt:27)
+    # — Xwayland covers Wayland sessions for X11 clients in practice.
+    # Wayland-only systems without Xwayland: -DGLFW_BUILD_WAYLAND=ON
+    # at configure time, with wayland-scanner + libwayland-dev installed.
+    set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "Build GLFW with Wayland support" FORCE)
     FetchContent_MakeAvailable(glfw)
-    message(STATUS "GLFW 3.4 fetched")
+    message(STATUS "GLFW 3.4 fetched (X11 only; -DGLFW_BUILD_WAYLAND=ON to enable Wayland)")
 endif()
