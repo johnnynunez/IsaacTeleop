@@ -114,7 +114,10 @@ void WindowBackend::init(const VkContext& ctx, Resolution preferred_size)
             fps = 60;
         }
         frame_period_ = std::chrono::nanoseconds(1'000'000'000ULL / fps);
-        next_frame_deadline_ = std::chrono::steady_clock::now();
+        // Subtract one period so begin_frame's first += lands at now()
+        // and the first frame doesn't burn ~16ms in sleep_until before
+        // rendering anything.
+        next_frame_deadline_ = std::chrono::steady_clock::now() - frame_period_;
     }
     catch (...)
     {
