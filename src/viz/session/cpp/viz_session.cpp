@@ -220,7 +220,10 @@ FrameInfo VizSession::render()
         backend_->poll_events();
         if (backend_->consume_resized())
         {
-            backend_->resize(backend_->current_extent());
+            // Backend queries its own window framebuffer for the new
+            // size; the hint is ignored. Keeping the parameter on the
+            // interface for backends that prefer caller-driven sizing.
+            backend_->resize(Resolution{});
         }
     }
     auto info = begin_frame();

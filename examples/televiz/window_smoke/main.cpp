@@ -117,10 +117,19 @@ int main()
         submit_solid(*layer, dev, kQuadW, kQuadH);
     }
 
-    // Run until the user closes the window.
+    // Run until the user closes the window. Print FPS once per second
+    // (every 60 frames at FIFO/60Hz) so resize / move stalls show up
+    // as visible drops in the terminal output.
     while (!session->should_close())
     {
-        session->render();
+        const auto info = session->render();
+        if (info.frame_index > 0 && info.frame_index % 60 == 0)
+        {
+            const auto stats = session->get_frame_timing_stats();
+            std::printf("frame %llu: %.1f fps (%.2f ms/frame)\n",
+                        static_cast<unsigned long long>(info.frame_index), stats.render_fps, stats.avg_frame_time_ms);
+            std::fflush(stdout);
+        }
     }
 
     // Tear down the session before freeing CUDA buffers — the layers

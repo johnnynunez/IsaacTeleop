@@ -95,6 +95,14 @@ public:
         return resolution_;
     }
 
+    // Recreate color/depth images + framebuffer at new_size. KEEPS the
+    // render pass — its compatibility doesn't depend on extent, so
+    // pipelines built against this RT's render_pass() stay valid. The
+    // caller must vkDeviceWaitIdle (or otherwise gate on retired GPU
+    // work) before invoking this; resize destroys the underlying
+    // images.
+    void resize(Resolution new_size);
+
 private:
     explicit RenderTarget(const VkContext& ctx);
 
@@ -104,6 +112,7 @@ private:
     void create_depth_image(const Config& config);
     void create_render_pass();
     void create_framebuffer();
+    void destroy_attachments(); // images + views + memory + framebuffer
 
     const VkContext* ctx_ = nullptr;
 

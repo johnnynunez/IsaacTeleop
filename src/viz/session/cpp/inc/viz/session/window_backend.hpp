@@ -5,6 +5,7 @@
 
 #include <viz/session/display_backend.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -27,6 +28,12 @@ public:
         uint32_t width = 1024;
         uint32_t height = 1024;
         std::string title = "televiz";
+        // Soft fps cap. 0 = use the primary monitor's refresh rate
+        // (queried via GLFW at init). With MAILBOX present mode the
+        // WSI doesn't throttle us, so without a cap we'd burn the GPU
+        // at thousands of fps. Set to a positive value to override
+        // (useful for benchmarks).
+        uint32_t target_fps = 0;
     };
 
     explicit WindowBackend(Config config);
@@ -56,6 +63,17 @@ private:
     std::unique_ptr<GlfwWindow> window_;
     std::unique_ptr<Swapchain> swapchain_;
     std::unique_ptr<RenderTarget> render_target_;
+
+    // Frame pacing. With MAILBOX present mode, the WSI never blocks
+    // our acquire; on a fast GPU we'd run at thousands of fps and
+    // peg power. The pacer runs at the START of begin_frame (before
+    // acquire) so it always executes once per render iteration —
+    // even when begin_frame returns nullopt (OUT_OF_DATE recovery).
+    // Putting it at end_frame would skip pacing on early returns
+    // and produce tight spin loops. Period is queried from the
+    // primary monitor's GLFW video mode at init.
+    std::chrono::nanoseconds frame_period_{ 0 };
+    std::chrono::steady_clock::time_point next_frame_deadline_{};
 
     // Per-frame: image_index from the most recent begin_frame() ride
     // out through end_frame() via Frame::backend_token. Stored as

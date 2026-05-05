@@ -7,6 +7,7 @@
 #include <viz/session/window_backend.hpp>
 
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 #define GLFW_INCLUDE_VULKAN
@@ -100,6 +101,30 @@ void WindowBackend::init(const VkContext& ctx, Resolution preferred_size)
         // Match intermediate RT extent to the swapchain so the post-
         // render blit is 1:1.
         render_target_ = RenderTarget::create(ctx, RenderTarget::Config{ swapchain_->extent() });
+
+        // Resolve the target fps. Config::target_fps overrides;
+        // otherwise we query the primary monitor's GLFW video mode.
+        // Final fallback is 60 — covers headless / virtual displays
+        // where refreshRate is reported as 0 or the query returns
+        // null.
+        uint32_t fps = config_.target_fps;
+        if (fps == 0)
+        {
+            GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+            const GLFWvidmode* mode = monitor != nullptr ? glfwGetVideoMode(monitor) : nullptr;
+            if (mode != nullptr && mode->refreshRate > 0)
+            {
+                fps = static_cast<uint32_t>(mode->refreshRate);
+            }
+        }
+        if (fps == 0)
+        {
+            fps = 60;
+        }
+        frame_period_ = std::chrono::nanoseconds(1'000'000'000ULL / fps);
+        // Initialize deadline to "now" so the first frame doesn't
+        // sleep against a zero time_point.
+        next_frame_deadline_ = std::chrono::steady_clock::now();
     }
     catch (...)
     {
@@ -125,11 +150,38 @@ std::optional<DisplayBackend::Frame> WindowBackend::begin_frame(int64_t /*predic
     {
         return std::nullopt;
     }
+
+    // Frame pacer FIRST, before any work. Running pacer here (rather
+    // than end_frame) ensures it executes even when begin_frame
+    // returns nullopt (OUT_OF_DATE recovery, swapchain not ready).
+    // Without this, an OUT_OF_DATE → return nullopt path skips the
+    // pacer entirely and the application loop spins at hundreds of
+    // kHz until the swapchain recovers. sleep_until on a monotonic
+    // clock has ~1ms slop on Linux — well under our 16.67ms budget.
+    next_frame_deadline_ += frame_period_;
+    const auto now = std::chrono::steady_clock::now();
+    if (next_frame_deadline_ < now)
+    {
+        // Fell behind (recreate took longer than the period).
+        // Reset the deadline so we don't accumulate debt.
+        next_frame_deadline_ = now;
+    }
+    else
+    {
+        std::this_thread::sleep_until(next_frame_deadline_);
+    }
+
     auto acquired = swapchain_->acquire_next_image();
     if (!acquired.has_value())
     {
-        // Out-of-date / suboptimal — caller (compositor / session)
-        // will skip + recreate via consume_resized() on next frame.
+        // OUT_OF_DATE: swapchain unusable, must recreate immediately.
+        // No throttle here — without a working swapchain we can't
+        // render anything, and skipping the recreate leaves us in a
+        // spin loop until the throttle elapses. Holoviz/nvpro_core2
+        // both recreate per-event without throttling; with our
+        // RenderTarget::resize (keeps render pass) + oldSwapchain
+        // hint, per-event recreate is fast enough.
+        resize(Resolution{});
         return std::nullopt;
     }
 
@@ -203,9 +255,8 @@ void WindowBackend::end_frame(const Frame& frame)
         return;
     }
     const uint32_t image_index = static_cast<uint32_t>(frame.backend_token);
-    // Out-of-date / suboptimal returns false; we let the next frame's
-    // begin_frame() observe it and the session catches it via
-    // consume_resized() in the GLFW callback.
+    // Out-of-date returns false; the next frame's begin_frame() will
+    // observe it and force-recreate. Pacing happens at begin_frame.
     (void)swapchain_->present(image_index, frame.signal_after_render);
 }
 
@@ -227,22 +278,36 @@ bool WindowBackend::consume_resized()
     return window_ ? window_->consume_resized() : false;
 }
 
-void WindowBackend::resize(Resolution new_size)
+void WindowBackend::resize(Resolution /*hint*/)
 {
-    if (swapchain_ == nullptr || ctx_ == nullptr)
+    // Backend is the source of truth for the target size — query the
+    // window directly instead of trusting the caller.
+    if (swapchain_ == nullptr || ctx_ == nullptr || window_ == nullptr || render_target_ == nullptr)
     {
         return;
     }
-    if (new_size.width == 0 || new_size.height == 0)
+    const Resolution target = window_->framebuffer_size();
+    if (target.width == 0 || target.height == 0)
     {
-        // Window is minimized — defer until non-zero size.
+        // Window minimized — defer until un-minimized.
         return;
     }
-    (void)vkDeviceWaitIdle(ctx_->device());
-    swapchain_->recreate(new_size);
-    // RenderTarget recreation is cheap; the new render pass is
-    // compatible with the prior so layer pipelines stay valid.
-    render_target_ = RenderTarget::create(*ctx_, RenderTarget::Config{ swapchain_->extent() });
+    const Resolution current = swapchain_->extent();
+    if (target.width == current.width && target.height == current.height)
+    {
+        return;
+    }
+
+    // No throttle — both Holoviz and nvpro_core2 recreate per resize
+    // event without throttling, and our optimized recreate path
+    // (Swapchain::recreate uses oldSwapchain to recycle driver
+    // resources; RenderTarget::resize keeps the render pass alive
+    // and rebuilds only color/depth+framebuffer) is fast enough that
+    // per-event recreate during drag holds an acceptable framerate
+    // without producing the OUT_OF_DATE spin-loops that throttling
+    // creates.
+    swapchain_->recreate(target);
+    render_target_->resize(swapchain_->extent());
 }
 
 Resolution WindowBackend::current_extent() const

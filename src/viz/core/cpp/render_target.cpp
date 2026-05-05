@@ -96,15 +96,21 @@ void RenderTarget::destroy()
     {
         return;
     }
-    if (framebuffer_ != VK_NULL_HANDLE)
-    {
-        vkDestroyFramebuffer(device, framebuffer_, nullptr);
-        framebuffer_ = VK_NULL_HANDLE;
-    }
+    destroy_attachments();
     if (render_pass_ != VK_NULL_HANDLE)
     {
         vkDestroyRenderPass(device, render_pass_, nullptr);
         render_pass_ = VK_NULL_HANDLE;
+    }
+}
+
+void RenderTarget::destroy_attachments()
+{
+    const VkDevice device = ctx_->device();
+    if (framebuffer_ != VK_NULL_HANDLE)
+    {
+        vkDestroyFramebuffer(device, framebuffer_, nullptr);
+        framebuffer_ = VK_NULL_HANDLE;
     }
     if (depth_view_ != VK_NULL_HANDLE)
     {
@@ -136,6 +142,25 @@ void RenderTarget::destroy()
         vkFreeMemory(device, color_memory_, nullptr);
         color_memory_ = VK_NULL_HANDLE;
     }
+}
+
+void RenderTarget::resize(Resolution new_size)
+{
+    if (new_size.width == 0 || new_size.height == 0)
+    {
+        return;
+    }
+    if (new_size.width == resolution_.width && new_size.height == resolution_.height)
+    {
+        return;
+    }
+    destroy_attachments();
+    resolution_ = new_size;
+    Config c{};
+    c.resolution = new_size;
+    create_color_image(c);
+    create_depth_image(c);
+    create_framebuffer();
 }
 
 void RenderTarget::create_color_image(const Config& config)

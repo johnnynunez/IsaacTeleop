@@ -93,7 +93,11 @@ public:
 
 private:
     Swapchain(const VkContext& ctx, VkSurfaceKHR surface);
-    void init(Resolution preferred_size);
+    // old_swapchain is passed as VkSwapchainCreateInfoKHR::oldSwapchain
+    // so the driver can retire the old swapchain's resources gracefully
+    // (much faster than a full destroy/create). VK_NULL_HANDLE on first
+    // create.
+    void init(Resolution preferred_size, VkSwapchainKHR old_swapchain = VK_NULL_HANDLE);
     void destroy_swapchain_only(); // teardown without releasing the surface
     void create_semaphores();
     void destroy_semaphores();
