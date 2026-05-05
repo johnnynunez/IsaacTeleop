@@ -242,11 +242,6 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
 
     check_vk(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer");
 
-    // Reset the fence immediately before submit. If anything between
-    // wait() and here threw, the fence stays signaled from the
-    // previous frame and the next render() doesn't deadlock.
-    frame_sync_->reset();
-
     // Layer waits (timeline) + backend's wait_before_render (binary,
     // value 0 ignored).
     std::vector<VkSemaphore> wait_semaphores;
@@ -296,6 +291,13 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
     submit.pWaitDstStageMask = wait_stages.empty() ? nullptr : wait_stages.data();
     submit.signalSemaphoreCount = static_cast<uint32_t>(signal_semaphores.size());
     submit.pSignalSemaphores = signal_semaphores.empty() ? nullptr : signal_semaphores.data();
+
+    // Reset the fence immediately before submit. Anything that
+    // throws above this point leaves the fence signaled from the
+    // previous frame, so the next render()'s wait() won't deadlock.
+    // submit_or_signal_fence handles vkQueueSubmit failure by
+    // submitting an empty signal so the fence still transitions.
+    frame_sync_->reset();
     submit_or_signal_fence(submit, "vkQueueSubmit");
 
     backend_->end_frame(*frame);

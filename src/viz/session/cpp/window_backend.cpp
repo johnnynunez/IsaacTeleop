@@ -234,8 +234,12 @@ void WindowBackend::end_frame(const Frame& frame)
         return;
     }
     const uint32_t image_index = static_cast<uint32_t>(frame.backend_token);
-    // Out-of-date returns false; next begin_frame catches it and recreates.
-    (void)swapchain_->present(image_index, frame.signal_after_render);
+    if (!swapchain_->present(image_index, frame.signal_after_render))
+    {
+        // OUT_OF_DATE on present: defer recreate to the next
+        // begin_frame instead of waiting for acquire to notice.
+        needs_recreate_ = true;
+    }
 }
 
 void WindowBackend::abort_frame(const Frame& /*frame*/)
