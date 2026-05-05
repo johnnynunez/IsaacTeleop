@@ -764,13 +764,14 @@ the WSS proxy uses (Python <code class="docutils literal notranslate"><span clas
 <li><p>Starts coturn locally on 127.0.0.1:3478 for WebRTC ICE relay.</p></li>
 <li><p>Launches the teleop URL on the headset and auto-clicks CONNECT via CDP.</p></li>
 </ol>
-<p>Optional: pass <code class="docutils literal notranslate"><span class="pre">--clear-headset-cache</span></code> to wipe localStorage / IndexedDB /
-cookies / HTTP cache for the teleop UI origin before the session starts.
-The SDK and WebXR client both cache settings (e.g.
-<code class="docutils literal notranslate"><span class="pre">general.iceTransportPolicy</span></code> for ICE transport policy,
+<p>In <code class="docutils literal notranslate"><span class="pre">--usb-local</span></code> mode the launcher also wipes localStorage / IndexedDB /
+cookies / HTTP cache for the teleop UI origin (<code class="docutils literal notranslate"><span class="pre">https://127.0.0.1:&lt;usb_ui_port&gt;</span></code>)
+before the session starts — the SDK and WebXR client both cache settings
+(e.g. <code class="docutils literal notranslate"><span class="pre">general.iceTransportPolicy</span></code> for ICE transport policy,
 <code class="docutils literal notranslate"><span class="pre">cxr.isaac.teleopPath</span></code> for the last-used project) in localStorage, and a
-stale value can silently win over a fresh URL param. Requires the headset
-browser to already be running (otherwise a no-op).</p>
+stale value can silently win over a fresh URL param. The origin is owned
+by the launcher so clearing it has no collateral effect; the step is a
+no-op when the headset browser isn’t running yet.</p>
 <p>Required apt packages: <code class="docutils literal notranslate"><span class="pre">adb</span></code> (<code class="docutils literal notranslate"><span class="pre">android-tools-adb</span></code>) and <code class="docutils literal notranslate"><span class="pre">coturn</span></code>.
 No Node.js / <code class="docutils literal notranslate"><span class="pre">npm</span></code> is required at runtime.</p>
 </section>
