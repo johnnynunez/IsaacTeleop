@@ -7,6 +7,7 @@
 #include <viz/core/viz_types.hpp>
 #include <viz/core/vk_context.hpp>
 #include <viz/layers/layer_base.hpp>
+#include <viz/session/display_mode.hpp>
 #include <viz/session/frame_info.hpp>
 #include <viz/session/viz_compositor.hpp>
 
@@ -19,17 +20,8 @@
 namespace viz
 {
 
-// Display backend selection at session creation time.
-//
-// kOffscreen is the only mode implemented today; readback_to_host() is
-// the primary output. kWindow (GLFW) and kXr (OpenXR + CloudXR) ship
-// with the window-mode and XR-mode milestones respectively.
-enum class DisplayMode
-{
-    kOffscreen,
-    kWindow,
-    kXr,
-};
+class GlfwWindow;
+class Swapchain;
 
 // Lifecycle states for a VizSession. The full set covers XR; window /
 // offscreen modes only transition through:
@@ -161,6 +153,12 @@ public:
     // their own pipelines. nullptr before create() / after destroy().
     const VkContext* get_vk_context() const noexcept;
 
+    // True when the underlying display target has been asked to close
+    // (user clicked the window close button, etc.). Always false in
+    // kOffscreen / kXr. Drives application loops:
+    //   while (!session.should_close()) session.render();
+    bool should_close() const noexcept;
+
 private:
     explicit VizSession(const Config& config);
     void init();
@@ -173,6 +171,13 @@ private:
     // Either we own a VkContext or we hold a borrowed pointer.
     std::unique_ptr<VkContext> owned_ctx_;
     VkContext* ctx_ptr_ = nullptr;
+
+    // Optional kWindow plumbing. Created in init() when mode == kWindow,
+    // destroyed in destroy(). Order matters: the swapchain must be
+    // destroyed before the GlfwWindow (the window owns the surface),
+    // and both before the VkContext.
+    std::unique_ptr<GlfwWindow> window_;
+    std::unique_ptr<Swapchain> swapchain_;
 
     std::unique_ptr<VizCompositor> compositor_;
     std::vector<std::unique_ptr<LayerBase>> layers_;

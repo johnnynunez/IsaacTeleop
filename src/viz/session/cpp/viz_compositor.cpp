@@ -3,10 +3,13 @@
 
 #include <viz/core/vk_context.hpp>
 #include <viz/layers/layer_base.hpp>
+#include <viz/session/swapchain.hpp>
+#include <viz/session/tile_layout.hpp>
 #include <viz/session/viz_compositor.hpp>
 
 #include <array>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -50,6 +53,10 @@ std::unique_ptr<VizCompositor> VizCompositor::create(const VkContext& ctx, const
     {
         throw std::invalid_argument("VizCompositor: resolution must be non-zero");
     }
+    if (config.mode == DisplayMode::kWindow && config.swapchain == nullptr)
+    {
+        throw std::invalid_argument("VizCompositor: kWindow requires a non-null swapchain");
+    }
     std::unique_ptr<VizCompositor> c(new VizCompositor(ctx, config));
     c->init();
     return c;
@@ -72,13 +79,44 @@ void VizCompositor::init()
         frame_sync_ = FrameSync::create(*ctx_);
         create_command_pool();
         create_command_buffer();
-        create_readback_staging();
+        // Readback staging is only useful in kOffscreen — kWindow / kXr
+        // present via swapchain and don't expose host readback.
+        if (config_.mode == DisplayMode::kOffscreen)
+        {
+            create_readback_staging();
+        }
     }
     catch (...)
     {
         destroy();
         throw;
     }
+}
+
+void VizCompositor::handle_resize(Resolution new_size)
+{
+    if (config_.mode != DisplayMode::kWindow || config_.swapchain == nullptr)
+    {
+        return;
+    }
+    if (new_size.width == 0 || new_size.height == 0)
+    {
+        // GLFW reports (0, 0) when the window is minimized; defer the
+        // recreate until the user un-minimizes (next non-zero size).
+        return;
+    }
+    // Drain GPU work before tearing down the intermediate RT — frame
+    // commands may still be in flight if the previous frame was the
+    // one that observed the resize.
+    (void)vkDeviceWaitIdle(ctx_->device());
+
+    config_.swapchain->recreate(new_size);
+    config_.resolution = config_.swapchain->extent();
+
+    // Rebuild the intermediate RT at the new size. Render pass remains
+    // valid (its compatibility doesn't depend on extent), but the
+    // VkImage / VkImageView / VkFramebuffer must be recreated.
+    render_target_ = RenderTarget::create(*ctx_, RenderTarget::Config{ config_.resolution });
 }
 
 void VizCompositor::destroy()
@@ -179,11 +217,99 @@ void VizCompositor::submit_or_signal_fence(const VkSubmitInfo& info, const char*
     throw std::runtime_error(std::string("VizCompositor: ") + what + " failed: VkResult=" + std::to_string(r));
 }
 
+namespace
+{
+
+Rect2D to_rect2d(const VkRect2D& r)
+{
+    return Rect2D{ r.offset.x, r.offset.y, r.extent.width, r.extent.height };
+}
+
+void transition_image(VkCommandBuffer cmd,
+                      VkImage image,
+                      VkImageLayout old_layout,
+                      VkImageLayout new_layout,
+                      VkAccessFlags src_access,
+                      VkAccessFlags dst_access,
+                      VkPipelineStageFlags src_stage,
+                      VkPipelineStageFlags dst_stage)
+{
+    VkImageMemoryBarrier b{};
+    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.oldLayout = old_layout;
+    b.newLayout = new_layout;
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = image;
+    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    b.subresourceRange.baseMipLevel = 0;
+    b.subresourceRange.levelCount = 1;
+    b.subresourceRange.baseArrayLayer = 0;
+    b.subresourceRange.layerCount = 1;
+    b.srcAccessMask = src_access;
+    b.dstAccessMask = dst_access;
+    vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &b);
+}
+
+} // namespace
+
 void VizCompositor::render(const std::vector<LayerBase*>& layers, const std::vector<ViewInfo>& views)
 {
     // Wait for the previous frame's GPU work to complete before reusing
     // the command buffer / fence (1 frame in flight today).
     frame_sync_->wait();
+
+    // Snapshot the visible-layer set ONCE per frame. is_visible() is
+    // an atomic flag; sampling it twice across record / wait-collect
+    // would let a mid-frame toggle record draws but skip the
+    // matching cuda_done_writing wait (or vice versa), which would
+    // race the producer's CUDA copy.
+    std::vector<LayerBase*> visible_layers;
+    visible_layers.reserve(layers.size());
+    for (LayerBase* layer : layers)
+    {
+        if (layer != nullptr && layer->is_visible())
+        {
+            visible_layers.push_back(layer);
+        }
+    }
+
+    // kWindow: acquire the next swapchain image. Out-of-date or
+    // suboptimal returns nullopt; we drop this frame and let the
+    // session call handle_resize() before the next render(). Returning
+    // here leaves frame_sync_ signaled from the previous wait(), so
+    // the next render() doesn't deadlock.
+    std::optional<Swapchain::AcquiredImage> acquired;
+    if (config_.mode == DisplayMode::kWindow)
+    {
+        acquired = config_.swapchain->acquire_next_image();
+        if (!acquired.has_value())
+        {
+            return;
+        }
+    }
+
+    // Build per-layer tile rects (kWindow only). For each visible
+    // layer the tile_layout helper returns:
+    //   outer:    the equal-slice tile (used as the layer's scissor —
+    //             confines all draws to this layer's region).
+    //   content:  the aspect-fit rect inside outer (used as the
+    //             layer's per-view viewport — letterbox margins keep
+    //             the framebuffer's clear color).
+    std::vector<TileSlot> tiles;
+    if (config_.mode == DisplayMode::kWindow && !visible_layers.empty())
+    {
+        const float fb_aspect =
+            static_cast<float>(config_.resolution.width) / static_cast<float>(config_.resolution.height);
+        std::vector<float> aspects;
+        aspects.reserve(visible_layers.size());
+        for (LayerBase* layer : visible_layers)
+        {
+            // Layers without a preferred aspect fill their full tile.
+            aspects.push_back(layer->aspect_ratio().value_or(fb_aspect));
+        }
+        tiles = tile_layout(aspects, config_.resolution, /*padding=*/0);
+    }
 
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer");
 
@@ -205,30 +331,58 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers, const std::vec
     rp.clearValueCount = static_cast<uint32_t>(clears.size());
     rp.pClearValues = clears.data();
 
-    // Snapshot the visible-layer set ONCE per frame. is_visible() is
-    // an atomic flag; sampling it twice across record / wait-collect
-    // would let a mid-frame toggle record draws but skip the
-    // matching cuda_done_writing wait (or vice versa), which would
-    // race the producer's CUDA copy.
-    std::vector<LayerBase*> visible_layers;
-    visible_layers.reserve(layers.size());
-    for (LayerBase* layer : layers)
-    {
-        if (layer != nullptr && layer->is_visible())
-        {
-            visible_layers.push_back(layer);
-        }
-    }
-
     vkCmdBeginRenderPass(command_buffer_, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
-    // Layer dispatch: insertion order, only the snapshotted visible set.
-    for (LayerBase* layer : visible_layers)
+    // Per-layer dispatch. Pre-bind scissor (= tile.outer in window,
+    // full-fb in offscreen) so any draw that escapes the layer's
+    // viewport is clipped. Build per-layer ViewInfo with viewport
+    // overridden to tile.content (or full-fb in offscreen).
+    const VkRect2D full_fb_rect{ { 0, 0 }, { config_.resolution.width, config_.resolution.height } };
+    for (size_t i = 0; i < visible_layers.size(); ++i)
     {
-        layer->record(command_buffer_, views, *render_target_);
+        const VkRect2D scissor_rect = (config_.mode == DisplayMode::kWindow) ? tiles[i].outer : full_fb_rect;
+        const VkRect2D viewport_rect = (config_.mode == DisplayMode::kWindow) ? tiles[i].content : full_fb_rect;
+        vkCmdSetScissor(command_buffer_, 0, 1, &scissor_rect);
+
+        // Per-layer copy of `views` with the viewport rect overridden.
+        // In window/offscreen views.size() == 1; in XR == 2 (per-eye
+        // viewports come from the OpenXR runtime, not from the tile).
+        std::vector<ViewInfo> layer_views(views.begin(), views.end());
+        if (layer_views.empty())
+        {
+            layer_views.push_back(ViewInfo{});
+        }
+        layer_views[0].viewport = to_rect2d(viewport_rect);
+        visible_layers[i]->record(command_buffer_, layer_views, *render_target_);
     }
 
     vkCmdEndRenderPass(command_buffer_);
+
+    // kWindow: blit the intermediate framebuffer to the swapchain
+    // image, transition for present.
+    if (acquired.has_value())
+    {
+        transition_image(command_buffer_, acquired->image, VK_IMAGE_LAYOUT_UNDEFINED,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+        const VkExtent2D sc_extent = { config_.swapchain->extent().width, config_.swapchain->extent().height };
+        VkImageBlit region{};
+        region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.srcSubresource.layerCount = 1;
+        region.srcOffsets[1] = { static_cast<int32_t>(config_.resolution.width),
+                                 static_cast<int32_t>(config_.resolution.height), 1 };
+        region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.dstSubresource.layerCount = 1;
+        region.dstOffsets[1] = { static_cast<int32_t>(sc_extent.width), static_cast<int32_t>(sc_extent.height), 1 };
+        vkCmdBlitImage(command_buffer_, render_target_->color_image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       acquired->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_LINEAR);
+
+        transition_image(command_buffer_, acquired->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    }
+
     check_vk(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer");
 
     // Reset the fence immediately before submit. If anything between
@@ -237,10 +391,11 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers, const std::vec
     // frame and the next render() doesn't deadlock on wait().
     frame_sync_->reset();
 
-    // Collect layer-provided wait timeline semaphores. Each visible
-    // layer contributes; flatten into the arrays vkQueueSubmit
-    // expects (with a chained VkTimelineSemaphoreSubmitInfo for the
-    // per-semaphore counter values).
+    // Collect layer-provided wait timeline semaphores + (in window mode)
+    // the swapchain's image-available semaphore. Flatten into the
+    // arrays vkQueueSubmit expects, with a chained
+    // VkTimelineSemaphoreSubmitInfo for the per-semaphore counter
+    // values (ignored on binary semaphores; padded with 0).
     std::vector<VkSemaphore> wait_semaphores;
     std::vector<uint64_t> wait_values;
     std::vector<VkPipelineStageFlags> wait_stages;
@@ -256,11 +411,27 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers, const std::vec
             }
         }
     }
+    if (acquired.has_value())
+    {
+        wait_semaphores.push_back(acquired->image_available);
+        wait_values.push_back(0); // binary semaphore — value ignored
+        wait_stages.push_back(VK_PIPELINE_STAGE_TRANSFER_BIT);
+    }
+
+    std::vector<VkSemaphore> signal_semaphores;
+    std::vector<uint64_t> signal_values;
+    if (acquired.has_value())
+    {
+        signal_semaphores.push_back(acquired->render_done);
+        signal_values.push_back(0); // binary semaphore — value ignored
+    }
 
     VkTimelineSemaphoreSubmitInfo timeline{};
     timeline.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
     timeline.waitSemaphoreValueCount = static_cast<uint32_t>(wait_values.size());
     timeline.pWaitSemaphoreValues = wait_values.empty() ? nullptr : wait_values.data();
+    timeline.signalSemaphoreValueCount = static_cast<uint32_t>(signal_values.size());
+    timeline.pSignalSemaphoreValues = signal_values.empty() ? nullptr : signal_values.data();
 
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -270,7 +441,17 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers, const std::vec
     submit.waitSemaphoreCount = static_cast<uint32_t>(wait_semaphores.size());
     submit.pWaitSemaphores = wait_semaphores.empty() ? nullptr : wait_semaphores.data();
     submit.pWaitDstStageMask = wait_stages.empty() ? nullptr : wait_stages.data();
+    submit.signalSemaphoreCount = static_cast<uint32_t>(signal_semaphores.size());
+    submit.pSignalSemaphores = signal_semaphores.empty() ? nullptr : signal_semaphores.data();
     submit_or_signal_fence(submit, "vkQueueSubmit");
+
+    // kWindow: queue the present (waits on render_done). Out-of-date
+    // returns false; we still drain via frame_sync_->wait() below so
+    // the next handle_resize() call sees idle GPU state.
+    if (acquired.has_value())
+    {
+        (void)config_.swapchain->present(acquired->image_index, acquired->render_done);
+    }
 
     // Wait for completion before returning so readback / next frame sees
     // a consistent state. With 1 frame in flight this is the natural

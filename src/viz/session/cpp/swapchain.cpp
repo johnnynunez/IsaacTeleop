@@ -273,7 +273,7 @@ std::optional<Swapchain::AcquiredImage> Swapchain::acquire_next_image()
     {
         throw std::runtime_error("Swapchain::acquire_next_image: VkResult=" + std::to_string(r));
     }
-    return AcquiredImage{ image_index, images_[image_index], sem };
+    return AcquiredImage{ image_index, images_[image_index], sem, render_done_[frame_slot_] };
 }
 
 bool Swapchain::present(uint32_t image_index, VkSemaphore render_done)

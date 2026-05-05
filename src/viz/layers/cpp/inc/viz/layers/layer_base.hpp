@@ -7,6 +7,7 @@
 #include <vulkan/vulkan.h>
 
 #include <atomic>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,23 @@ namespace viz
 {
 
 class RenderTarget;
+
+// Standard mapping from ViewInfo::viewport to vkCmdSetViewport: origin
+// top-left, depth 0..1, no y-flip. Layers call this once per view in
+// record() before issuing draws. Layer authors should NOT bind scissor
+// — the compositor pre-binds it for tile isolation in window mode and
+// per-eye composition layers in XR.
+inline void bind_view_viewport(VkCommandBuffer cmd, const ViewInfo& view)
+{
+    VkViewport vp{};
+    vp.x = static_cast<float>(view.viewport.x);
+    vp.y = static_cast<float>(view.viewport.y);
+    vp.width = static_cast<float>(view.viewport.width);
+    vp.height = static_cast<float>(view.viewport.height);
+    vp.minDepth = 0.0f;
+    vp.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+}
 
 // Abstract base class for content rendered by Televiz's compositor.
 //
@@ -44,11 +62,19 @@ public:
     LayerBase& operator=(const LayerBase&) = delete;
 
     // Issue draw commands inside the currently-active render pass.
-    //   cmd:    the compositor's command buffer with the render pass active
-    //   views:  per-view parameters (1 entry in window/offscreen, 2 in XR
-    //           stereo). Indexable by view index for stereo viewport setup.
-    //   target: the framebuffer dimensions and Vulkan handles the layer
-    //           draws into; const so layers cannot modify the target.
+    //   cmd:    command buffer with render pass active and the layer's
+    //           SCISSOR pre-bound by the compositor.
+    //   views:  per-view parameters (1 in window/offscreen, 2 in XR stereo).
+    //           Each entry's `viewport` is the rect this layer must draw
+    //           into for that view — bind it via vkCmdSetViewport (use
+    //           viz::bind_view_viewport) before drawing.
+    //   target: framebuffer handles. Read-only.
+    //
+    // Contract:
+    //   - DO    bind viewport per view via vkCmdSetViewport.
+    //   - DO NOT bind scissor — the compositor sets it. Overriding scissor
+    //           breaks tile isolation in window mode and per-eye comp
+    //           layers in XR.
     virtual void record(VkCommandBuffer cmd, const std::vector<ViewInfo>& views, const RenderTarget& target) = 0;
 
     // Per-frame wait wiring for layers that synchronize against CUDA
@@ -73,6 +99,16 @@ public:
     virtual std::vector<WaitSemaphore> get_wait_semaphores() const
     {
         return {};
+    }
+
+    // Optional aspect ratio (width / height) hint for window-mode tiling.
+    // The compositor uses this to compute the layer's content rect inside
+    // its tile so content keeps its aspect when the tile doesn't match.
+    // Returning nullopt means "no preferred aspect — fill the tile". XR
+    // mode ignores this (per-eye viewports come from the OpenXR runtime).
+    virtual std::optional<float> aspect_ratio() const noexcept
+    {
+        return std::nullopt;
     }
 
     const std::string& name() const noexcept;

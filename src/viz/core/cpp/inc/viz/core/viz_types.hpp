@@ -18,6 +18,16 @@ struct Resolution
     uint32_t height = 0;
 };
 
+// 2D pixel-coordinate rectangle. Mirrors VkRect2D (offset + extent) but
+// stays Vulkan-free so viz_types.hpp doesn't pull in vulkan.h.
+struct Rect2D
+{
+    int32_t x = 0;
+    int32_t y = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+};
+
 // 3D pose in OpenXR stage space: right-handed, Y-up, meters for distance,
 // orientation as a unit quaternion. Default-constructed is identity.
 //
@@ -55,6 +65,12 @@ struct ViewInfo
     glm::mat4 projection_matrix{ 1.0f }; // identity
     Fov fov{};
     Pose3D pose{};
+    // Pixel rect in the framebuffer the layer should draw into for
+    // this view. Filled by the compositor before record(). In window
+    // mode it's the layer's aspect-fit content rect inside its tile;
+    // in XR stereo it's the eye's subImage.imageRect; in offscreen
+    // it's the full target.
+    Rect2D viewport{};
 };
 
 } // namespace viz

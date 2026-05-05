@@ -173,6 +173,15 @@ PixelFormat QuadLayer::format() const noexcept
     return config_.format;
 }
 
+std::optional<float> QuadLayer::aspect_ratio() const noexcept
+{
+    if (config_.resolution.height == 0)
+    {
+        return std::nullopt;
+    }
+    return static_cast<float>(config_.resolution.width) / static_cast<float>(config_.resolution.height);
+}
+
 const DeviceImage* QuadLayer::device_image(uint32_t slot) const noexcept
 {
     if (slot >= kSlotCount)
@@ -242,7 +251,7 @@ void QuadLayer::submit(const VizBuffer& src, cudaStream_t stream)
     latest_.store(slot, std::memory_order_release);
 }
 
-void QuadLayer::record(VkCommandBuffer cmd, const std::vector<ViewInfo>& /*views*/, const RenderTarget& target)
+void QuadLayer::record(VkCommandBuffer cmd, const std::vector<ViewInfo>& views, const RenderTarget& /*target*/)
 {
     require_alive(slots_[0], "record");
 
@@ -262,29 +271,19 @@ void QuadLayer::record(VkCommandBuffer cmd, const std::vector<ViewInfo>& /*views
         return;
     }
 
-    const Resolution res = target.resolution();
-
-    VkViewport viewport{};
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
-    viewport.width = static_cast<float>(res.width);
-    viewport.height = static_cast<float>(res.height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-    vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-    VkRect2D scissor{};
-    scissor.offset = { 0, 0 };
-    scissor.extent = { res.width, res.height };
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
-
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
     vkCmdBindDescriptorSets(
         cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 0, 1, &descriptor_sets_[cur], 0, nullptr);
 
-    // 3 vertices, no vertex buffer — vertex shader emits a fullscreen
-    // triangle from gl_VertexIndex.
-    vkCmdDraw(cmd, 3, 1, 0, 0);
+    // 1 view in window/offscreen, 2 in XR stereo. Compositor pre-bound
+    // the layer's scissor; we bind viewport per view and draw.
+    for (const auto& view : views)
+    {
+        bind_view_viewport(cmd, view);
+        // 3 vertices, no vertex buffer — vertex shader emits a
+        // fullscreen triangle from gl_VertexIndex.
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+    }
 }
 
 std::vector<LayerBase::WaitSemaphore> QuadLayer::get_wait_semaphores() const

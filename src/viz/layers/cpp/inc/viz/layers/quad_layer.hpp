@@ -95,6 +95,10 @@ public:
     // cuda_done_writing before the fragment shader samples it.
     std::vector<LayerBase::WaitSemaphore> get_wait_semaphores() const override;
 
+    // resolution().width / resolution().height. Drives aspect-fit
+    // letterbox in window mode; XR mode ignores it.
+    std::optional<float> aspect_ratio() const noexcept override;
+
     Resolution resolution() const noexcept;
     PixelFormat format() const noexcept;
 

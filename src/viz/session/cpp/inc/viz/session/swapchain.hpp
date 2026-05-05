@@ -44,13 +44,16 @@ public:
 
     // Acquire the next presentable image. Returns std::nullopt if the
     // swapchain is out-of-date or suboptimal — caller must recreate()
-    // before retrying. The returned image_available semaphore is
-    // owned by Swapchain; do not destroy.
+    // before retrying. Both semaphores are owned by Swapchain; the
+    // caller waits on image_available before writing the swapchain
+    // image (TRANSFER_DST blit) and signals render_done when done so
+    // present() can wait on it.
     struct AcquiredImage
     {
         uint32_t image_index;
         VkImage image;
         VkSemaphore image_available;
+        VkSemaphore render_done;
     };
     std::optional<AcquiredImage> acquire_next_image();
 

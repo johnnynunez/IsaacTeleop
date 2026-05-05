@@ -7,6 +7,7 @@
 #include <viz/core/host_image.hpp>
 #include <viz/core/render_target.hpp>
 #include <viz/core/viz_types.hpp>
+#include <viz/session/display_mode.hpp>
 #include <vulkan/vulkan.h>
 
 #include <memory>
@@ -16,6 +17,7 @@ namespace viz
 {
 
 class LayerBase;
+class Swapchain;
 class VkContext;
 
 // VizCompositor: the per-session GPU pipeline that runs one render pass
@@ -33,6 +35,10 @@ public:
     {
         Resolution resolution{};
         VkClearColorValue clear_color{ { 0.0f, 0.0f, 0.0f, 1.0f } };
+        DisplayMode mode = DisplayMode::kOffscreen;
+        // Required when mode == kWindow. Compositor doesn't own it —
+        // VizSession owns the lifetime.
+        Swapchain* swapchain = nullptr;
     };
 
     static std::unique_ptr<VizCompositor> create(const VkContext& ctx, const Config& config);
@@ -50,8 +56,24 @@ public:
     // render pass. Blocks on the previous frame's fence before recording
     // and on the new fence before returning (1-frame-in-flight today).
     //
+    // For each visible layer the compositor pre-binds its scissor (full
+    // framebuffer in kOffscreen, the layer's tile in kWindow) and builds
+    // per-layer ViewInfo with the viewport rect set to the content rect
+    // (== framebuffer in kOffscreen, aspect-fit content in kWindow).
+    //
+    // In kWindow: acquires the next swapchain image at frame start,
+    // blits the intermediate framebuffer to it after the render pass,
+    // transitions to PRESENT_SRC, and presents. Returns silently on
+    // out-of-date swapchain — caller should call handle_resize before
+    // the next frame.
+    //
     // Throws std::runtime_error on Vulkan failure.
     void render(const std::vector<LayerBase*>& layers, const std::vector<ViewInfo>& views);
+
+    // Drain the device, recreate the swapchain at the new size, and
+    // recreate the intermediate render target to match. No-op in
+    // kOffscreen. Used by VizSession when GLFW reports a resize.
+    void handle_resize(Resolution new_size);
 
     // Read the most recent frame's color attachment back to a host
     // buffer. Returns a HostImage owning tightly-packed RGBA8 bytes;

@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#include <viz/session/glfw_window.hpp>
+#include <viz/session/swapchain.hpp>
 #include <viz/session/viz_session.hpp>
+
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
 
 #include <algorithm>
 #include <stdexcept>
@@ -12,14 +17,32 @@ namespace viz
 namespace
 {
 
-void check_offscreen_only(DisplayMode mode, const char* what)
+void reject_xr(DisplayMode mode, const char* what)
 {
-    if (mode != DisplayMode::kOffscreen)
+    if (mode == DisplayMode::kXr)
     {
         throw std::runtime_error(std::string("VizSession: ") + what +
-                                 " is not implemented for the requested DisplayMode "
-                                 "(only kOffscreen is currently supported)");
+                                 " is not implemented for kXr (XR backend ships in M5)");
     }
+}
+
+std::vector<std::string> glfw_required_instance_extensions_or_throw()
+{
+    uint32_t count = 0;
+    const char** raw = glfwGetRequiredInstanceExtensions(&count);
+    if (raw == nullptr)
+    {
+        throw std::runtime_error(
+            "VizSession: glfwGetRequiredInstanceExtensions returned null "
+            "(no Vulkan loader visible to GLFW)");
+    }
+    std::vector<std::string> out;
+    out.reserve(count);
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        out.emplace_back(raw[i]);
+    }
+    return out;
 }
 
 } // namespace
@@ -46,13 +69,22 @@ VizSession::~VizSession()
 
 void VizSession::init()
 {
-    // Reject unsupported display modes before allocating any Vulkan
-    // state — saves a wasted vkCreateInstance + device on a config we
-    // know we can't support yet.
-    check_offscreen_only(config_.mode, "create");
+    // kXr is the only mode not implemented yet; kOffscreen + kWindow
+    // ship now. Reject early to avoid a wasted vkCreateInstance on a
+    // mode we can't support.
+    reject_xr(config_.mode, "create");
 
     try
     {
+        // Build the VkContext config based on display mode. kWindow
+        // needs GLFW's required instance extensions + VK_KHR_swapchain.
+        VkContext::Config vk_cfg{};
+        if (config_.mode == DisplayMode::kWindow)
+        {
+            vk_cfg.instance_extensions = glfw_required_instance_extensions_or_throw();
+            vk_cfg.device_extensions.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        }
+
         // Acquire / create the Vulkan context.
         if (config_.external_context != nullptr)
         {
@@ -65,15 +97,29 @@ void VizSession::init()
         else
         {
             owned_ctx_ = std::make_unique<VkContext>();
-            owned_ctx_->init(VkContext::Config{});
+            owned_ctx_->init(vk_cfg);
             ctx_ptr_ = owned_ctx_.get();
         }
 
+        // For kWindow: open the GLFW window + Vulkan swapchain. The
+        // intermediate render target's resolution matches the swapchain
+        // extent so the post-render blit is 1:1.
+        Resolution render_res{ config_.window_width, config_.window_height };
+        if (config_.mode == DisplayMode::kWindow)
+        {
+            window_ = GlfwWindow::create(ctx_ptr_->instance(), config_.window_width, config_.window_height,
+                                         config_.app_name);
+            swapchain_ = Swapchain::create(*ctx_ptr_, window_->surface(),
+                                           Resolution{ config_.window_width, config_.window_height });
+            render_res = swapchain_->extent();
+        }
 
         VizCompositor::Config c_cfg{};
-        c_cfg.resolution = { config_.window_width, config_.window_height };
+        c_cfg.resolution = render_res;
         c_cfg.clear_color = { { config_.clear_color[0], config_.clear_color[1], config_.clear_color[2],
                                 config_.clear_color[3] } };
+        c_cfg.mode = config_.mode;
+        c_cfg.swapchain = swapchain_.get();
         compositor_ = VizCompositor::create(*ctx_ptr_, c_cfg);
 
         state_ = SessionState::kReady;
@@ -89,6 +135,11 @@ void VizSession::destroy()
 {
     layers_.clear();
     compositor_.reset();
+    // Order: swapchain holds VkSurfaceKHR refs (drains on destroy);
+    // window owns the surface; both must outlive the device but be
+    // destroyed before the VkContext.
+    swapchain_.reset();
+    window_.reset();
     if (owned_ctx_)
     {
         owned_ctx_.reset();
@@ -198,6 +249,18 @@ void VizSession::end_frame()
 
 FrameInfo VizSession::render()
 {
+    if (window_)
+    {
+        // Pump GLFW events first — drives close button, resize callback,
+        // any input handlers users register on the window.
+        window_->poll_events();
+        if (window_->consume_resized())
+        {
+            // Defer to compositor: drain device, recreate swapchain +
+            // intermediate RT at the new framebuffer size.
+            compositor_->handle_resize(window_->framebuffer_size());
+        }
+    }
     auto info = begin_frame();
     end_frame();
     return info;
@@ -225,12 +288,22 @@ Resolution VizSession::get_recommended_resolution() const noexcept
 
 HostImage VizSession::readback_to_host()
 {
-    check_offscreen_only(config_.mode, "readback_to_host");
+    if (config_.mode != DisplayMode::kOffscreen)
+    {
+        throw std::runtime_error(
+            "VizSession::readback_to_host: only kOffscreen supports host readback "
+            "(use the swapchain present path in kWindow / kXr)");
+    }
     if (!compositor_)
     {
         throw std::runtime_error("VizSession: readback_to_host called before init");
     }
     return compositor_->readback_to_host();
+}
+
+bool VizSession::should_close() const noexcept
+{
+    return window_ ? window_->should_close() : false;
 }
 
 const VkContext& VizSession::ctx() const noexcept
