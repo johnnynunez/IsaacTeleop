@@ -1,12 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#include <viz/session/glfw_window.hpp>
-#include <viz/session/swapchain.hpp>
+#include <viz/session/display_backend.hpp>
+#include <viz/session/offscreen_backend.hpp>
 #include <viz/session/viz_session.hpp>
-
-#define GLFW_INCLUDE_VULKAN
-#include <GLFW/glfw3.h>
+#include <viz/session/window_backend.hpp>
 
 #include <algorithm>
 #include <stdexcept>
@@ -17,32 +15,26 @@ namespace viz
 namespace
 {
 
-void reject_xr(DisplayMode mode, const char* what)
+// Factory: instantiate the backend matching the requested mode.
+// kXr is rejected here until the M5 XR backend lands.
+std::unique_ptr<DisplayBackend> make_backend(const VizSession::Config& cfg)
 {
-    if (mode == DisplayMode::kXr)
+    switch (cfg.mode)
     {
-        throw std::runtime_error(std::string("VizSession: ") + what +
-                                 " is not implemented for kXr (XR backend ships in M5)");
-    }
-}
-
-std::vector<std::string> glfw_required_instance_extensions_or_throw()
-{
-    uint32_t count = 0;
-    const char** raw = glfwGetRequiredInstanceExtensions(&count);
-    if (raw == nullptr)
+    case DisplayMode::kOffscreen:
+        return std::make_unique<OffscreenBackend>();
+    case DisplayMode::kWindow:
     {
-        throw std::runtime_error(
-            "VizSession: glfwGetRequiredInstanceExtensions returned null "
-            "(no Vulkan loader visible to GLFW)");
+        WindowBackend::Config wc{};
+        wc.width = cfg.window_width;
+        wc.height = cfg.window_height;
+        wc.title = cfg.app_name;
+        return std::make_unique<WindowBackend>(wc);
     }
-    std::vector<std::string> out;
-    out.reserve(count);
-    for (uint32_t i = 0; i < count; ++i)
-    {
-        out.emplace_back(raw[i]);
+    case DisplayMode::kXr:
+        throw std::runtime_error("VizSession: kXr is not implemented (XR backend ships in M5)");
     }
-    return out;
+    throw std::runtime_error("VizSession: unknown DisplayMode");
 }
 
 } // namespace
@@ -69,21 +61,17 @@ VizSession::~VizSession()
 
 void VizSession::init()
 {
-    // kXr is the only mode not implemented yet; kOffscreen + kWindow
-    // ship now. Reject early to avoid a wasted vkCreateInstance on a
-    // mode we can't support.
-    reject_xr(config_.mode, "create");
+    // Build the backend FIRST — it knows which Vulkan extensions to
+    // ask for. Reject unsupported modes before any Vulkan work.
+    backend_ = make_backend(config_);
 
     try
     {
-        // Build the VkContext config based on display mode. kWindow
-        // needs GLFW's required instance extensions + VK_KHR_swapchain.
+        // Build the VkContext config from the backend's required
+        // extensions plus any caller-provided extras.
         VkContext::Config vk_cfg{};
-        if (config_.mode == DisplayMode::kWindow)
-        {
-            vk_cfg.instance_extensions = glfw_required_instance_extensions_or_throw();
-            vk_cfg.device_extensions.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
-        }
+        vk_cfg.instance_extensions = backend_->required_instance_extensions();
+        vk_cfg.device_extensions = backend_->required_device_extensions();
 
         // Acquire / create the Vulkan context.
         if (config_.external_context != nullptr)
@@ -101,26 +89,14 @@ void VizSession::init()
             ctx_ptr_ = owned_ctx_.get();
         }
 
-        // For kWindow: open the GLFW window + Vulkan swapchain. The
-        // intermediate render target's resolution matches the swapchain
-        // extent so the post-render blit is 1:1.
-        Resolution render_res{ config_.window_width, config_.window_height };
-        if (config_.mode == DisplayMode::kWindow)
-        {
-            window_ = GlfwWindow::create(ctx_ptr_->instance(), config_.window_width, config_.window_height,
-                                         config_.app_name);
-            swapchain_ = Swapchain::create(*ctx_ptr_, window_->surface(),
-                                           Resolution{ config_.window_width, config_.window_height });
-            render_res = swapchain_->extent();
-        }
+        // Backend allocates its mode-specific resources (intermediate
+        // RT, swapchain, readback staging, etc.).
+        backend_->init(*ctx_ptr_, Resolution{ config_.window_width, config_.window_height });
 
         VizCompositor::Config c_cfg{};
-        c_cfg.resolution = render_res;
         c_cfg.clear_color = { { config_.clear_color[0], config_.clear_color[1], config_.clear_color[2],
                                 config_.clear_color[3] } };
-        c_cfg.mode = config_.mode;
-        c_cfg.swapchain = swapchain_.get();
-        compositor_ = VizCompositor::create(*ctx_ptr_, c_cfg);
+        compositor_ = VizCompositor::create(*ctx_ptr_, *backend_, c_cfg);
 
         state_ = SessionState::kReady;
     }
@@ -134,12 +110,10 @@ void VizSession::init()
 void VizSession::destroy()
 {
     layers_.clear();
+    // Order: compositor (non-owning ref to backend) first, then the
+    // backend (holds device resources), then the context.
     compositor_.reset();
-    // Order: swapchain holds VkSurfaceKHR refs (drains on destroy);
-    // window owns the surface; both must outlive the device but be
-    // destroyed before the VkContext.
-    swapchain_.reset();
-    window_.reset();
+    backend_.reset();
     if (owned_ctx_)
     {
         owned_ctx_.reset();
@@ -191,14 +165,14 @@ FrameInfo VizSession::begin_frame()
     current_frame_info_.frame_index = frame_index_;
     current_frame_info_.predicted_display_time = 0; // XR-only; 0 in offscreen
     current_frame_info_.should_render = (state_ == SessionState::kRunning);
-    current_frame_info_.resolution = compositor_->resolution();
-    // Single identity view in window/offscreen; XR backend extends to per-eye.
+    current_frame_info_.resolution = compositor_ ? compositor_->resolution() : Resolution{};
+    // Backend-built per-view info ships with the next frame; the
+    // public FrameInfo carries a single identity entry as a hint to
+    // application code (real per-eye XR views are populated inside
+    // the compositor's render loop in M5).
     current_frame_info_.views.assign(1, ViewInfo{});
 
-    // Set last so any earlier throw leaves the flag false and the next
-    // begin_frame() can proceed normally.
     frame_in_progress_ = true;
-
     return current_frame_info_;
 }
 
@@ -210,16 +184,10 @@ void VizSession::end_frame()
     }
     if (state_ != SessionState::kRunning)
     {
-        // No-op in non-running states (matches the design: kStopping
-        // submits an empty frame; kReady never enters end_frame).
-        // Still clear the in-progress flag so the pairing contract holds.
         frame_in_progress_ = false;
         return;
     }
 
-    // Always clear the in-progress flag, even if the render call below
-    // throws — leaving it true would lock out all subsequent begin_frame()
-    // calls for the rest of the session.
     struct ClearGuard
     {
         bool* flag;
@@ -229,8 +197,6 @@ void VizSession::end_frame()
         }
     } guard{ &frame_in_progress_ };
 
-    // Build a raw-pointer view of the layer registry for the compositor —
-    // avoids forcing the compositor to know about std::unique_ptr.
     std::vector<LayerBase*> raw_layers;
     raw_layers.reserve(layers_.size());
     for (const auto& l : layers_)
@@ -240,7 +206,7 @@ void VizSession::end_frame()
 
     if (current_frame_info_.should_render)
     {
-        compositor_->render(raw_layers, current_frame_info_.views);
+        compositor_->render(raw_layers);
     }
 
     update_timing_stats(current_frame_info_.delta_time);
@@ -249,16 +215,12 @@ void VizSession::end_frame()
 
 FrameInfo VizSession::render()
 {
-    if (window_)
+    if (backend_)
     {
-        // Pump GLFW events first — drives close button, resize callback,
-        // any input handlers users register on the window.
-        window_->poll_events();
-        if (window_->consume_resized())
+        backend_->poll_events();
+        if (backend_->consume_resized())
         {
-            // Defer to compositor: drain device, recreate swapchain +
-            // intermediate RT at the new framebuffer size.
-            compositor_->handle_resize(window_->framebuffer_size());
+            backend_->resize(backend_->current_extent());
         }
     }
     auto info = begin_frame();
@@ -272,8 +234,6 @@ void VizSession::update_timing_stats(float frame_time_seconds)
     {
         return;
     }
-    // Simple exponential moving average; full FPS smoothing arrives with
-    // the window/XR backends' real frame pacing.
     constexpr float kSmoothing = 0.1f;
     const float frame_ms = frame_time_seconds * 1000.0f;
     timing_stats_.avg_frame_time_ms = kSmoothing * frame_ms + (1.0f - kSmoothing) * timing_stats_.avg_frame_time_ms;
@@ -283,27 +243,25 @@ void VizSession::update_timing_stats(float frame_time_seconds)
 
 Resolution VizSession::get_recommended_resolution() const noexcept
 {
-    return compositor_ ? compositor_->resolution() : Resolution{ config_.window_width, config_.window_height };
+    if (compositor_)
+    {
+        return compositor_->resolution();
+    }
+    return Resolution{ config_.window_width, config_.window_height };
 }
 
 HostImage VizSession::readback_to_host()
 {
-    if (config_.mode != DisplayMode::kOffscreen)
-    {
-        throw std::runtime_error(
-            "VizSession::readback_to_host: only kOffscreen supports host readback "
-            "(use the swapchain present path in kWindow / kXr)");
-    }
-    if (!compositor_)
+    if (!backend_)
     {
         throw std::runtime_error("VizSession: readback_to_host called before init");
     }
-    return compositor_->readback_to_host();
+    return backend_->readback_to_host();
 }
 
 bool VizSession::should_close() const noexcept
 {
-    return window_ ? window_->should_close() : false;
+    return backend_ ? backend_->should_close() : false;
 }
 
 const VkContext& VizSession::ctx() const noexcept

@@ -5,9 +5,7 @@
 
 #include <viz/core/frame_sync.hpp>
 #include <viz/core/host_image.hpp>
-#include <viz/core/render_target.hpp>
 #include <viz/core/viz_types.hpp>
-#include <viz/session/display_mode.hpp>
 #include <vulkan/vulkan.h>
 
 #include <memory>
@@ -16,32 +14,27 @@
 namespace viz
 {
 
+class DisplayBackend;
 class LayerBase;
-class Swapchain;
 class VkContext;
 
-// VizCompositor: the per-session GPU pipeline that runs one render pass
-// per frame. Owns the intermediate RenderTarget, command pool / buffer,
-// and FrameSync. Iterates a layer registry (held by VizSession) calling
-// each visible layer's record() inside the active render pass, then
-// submits to the queue.
+// VizCompositor: per-session GPU pipeline that runs one render pass
+// per frame. Drives a non-owning DisplayBackend for everything mode-
+// specific (target image, present, readback). Owns the per-frame
+// fence and the command pool / buffer.
 //
 // Lifetime: owned by VizSession. Created when the session moves from
-// kUninitialized to kReady; destroyed when the session is destroyed.
+// kUninitialized to kReady (after the backend has been created and
+// initialized); destroyed when the session is destroyed.
 class VizCompositor
 {
 public:
     struct Config
     {
-        Resolution resolution{};
         VkClearColorValue clear_color{ { 0.0f, 0.0f, 0.0f, 1.0f } };
-        DisplayMode mode = DisplayMode::kOffscreen;
-        // Required when mode == kWindow. Compositor doesn't own it —
-        // VizSession owns the lifetime.
-        Swapchain* swapchain = nullptr;
     };
 
-    static std::unique_ptr<VizCompositor> create(const VkContext& ctx, const Config& config);
+    static std::unique_ptr<VizCompositor> create(const VkContext& ctx, DisplayBackend& backend, const Config& config);
 
     ~VizCompositor();
     void destroy();
@@ -51,51 +44,34 @@ public:
     VizCompositor(VizCompositor&&) = delete;
     VizCompositor& operator=(VizCompositor&&) = delete;
 
-    // Records and submits one frame. Iterates `layers` (insertion order),
-    // skipping invisible ones, calling layer->record() inside the active
-    // render pass. Blocks on the previous frame's fence before recording
-    // and on the new fence before returning (1-frame-in-flight today).
-    //
-    // For each visible layer the compositor pre-binds its scissor (full
-    // framebuffer in kOffscreen, the layer's tile in kWindow) and builds
-    // per-layer ViewInfo with the viewport rect set to the content rect
-    // (== framebuffer in kOffscreen, aspect-fit content in kWindow).
-    //
-    // In kWindow: acquires the next swapchain image at frame start,
-    // blits the intermediate framebuffer to it after the render pass,
-    // transitions to PRESENT_SRC, and presents. Returns silently on
-    // out-of-date swapchain — caller should call handle_resize before
-    // the next frame.
-    //
-    // Throws std::runtime_error on Vulkan failure.
-    void render(const std::vector<LayerBase*>& layers, const std::vector<ViewInfo>& views);
+    // Records and submits one frame.
+    //   1. backend.begin_frame() -> Frame (or skip).
+    //   2. Snapshot visible layers; compute per-layer tile rects from
+    //      their aspect_ratio() hints.
+    //   3. Begin render pass on backend.render_target(); pre-bind
+    //      scissor per layer (tile.outer); call layer->record() with
+    //      per-layer ViewInfo (viewport = tile.content).
+    //   4. End render pass; backend.record_post_render_pass() does
+    //      any blit / transition the backend needs.
+    //   5. Submit, waiting on layers' cuda_done_writing +
+    //      frame.wait_before_render, signaling frame.signal_after_render.
+    //   6. backend.end_frame() — present / xrEndFrame / no-op.
+    //   7. fence wait — synchronous frame (mailbox layers depend on
+    //      this — see quad_layer.hpp).
+    void render(const std::vector<LayerBase*>& layers);
 
-    // Drain the device, recreate the swapchain at the new size, and
-    // recreate the intermediate render target to match. No-op in
-    // kOffscreen. Used by VizSession when GLFW reports a resize.
-    void handle_resize(Resolution new_size);
-
-    // Read the most recent frame's color attachment back to a host
-    // buffer. Returns a HostImage owning tightly-packed RGBA8 bytes;
-    // call HostImage::view() to obtain a VizBuffer view suitable for
-    // image helpers. The caller must have called render() at least
-    // once; pixels are undefined otherwise. Used by tests / debug
-    // tooling — production (CUDA-pointer) readback ships with
-    // CUDA-Vulkan interop.
+    // Forwards to backend; convenience for VizSession.
     HostImage readback_to_host();
 
-    // Accessors for layers / external code that needs to build pipelines
-    // against the compositor's render pass.
     VkRenderPass render_pass() const noexcept;
     Resolution resolution() const noexcept;
 
 private:
-    VizCompositor(const VkContext& ctx, const Config& config);
+    VizCompositor(const VkContext& ctx, DisplayBackend& backend, const Config& config);
     void init();
 
     void create_command_pool();
     void create_command_buffer();
-    void create_readback_staging();
 
     // vkQueueSubmit wrapper that recovers the fence if submit fails.
     // After frame_sync_->reset(), the fence is unsignaled; if the real
@@ -107,21 +83,12 @@ private:
     void submit_or_signal_fence(const VkSubmitInfo& info, const char* what);
 
     const VkContext* ctx_ = nullptr;
+    DisplayBackend* backend_ = nullptr;
     Config config_{};
 
-    std::unique_ptr<RenderTarget> render_target_;
     std::unique_ptr<FrameSync> frame_sync_;
-
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;
-
-    // Pre-allocated host-visible staging buffer for readback_to_host.
-    // Created once at init() (sized to the configured resolution),
-    // reused on every readback, freed in destroy(). Avoids per-call
-    // allocation churn and removes the leak-on-throw concern entirely.
-    VkBuffer readback_buffer_ = VK_NULL_HANDLE;
-    VkDeviceMemory readback_memory_ = VK_NULL_HANDLE;
-    VkDeviceSize readback_byte_size_ = 0;
 };
 
 } // namespace viz

@@ -82,6 +82,14 @@ public:
     {
         return static_cast<uint32_t>(images_.size());
     }
+    // Indexed accessor for the swapchain's images. Caller passes the
+    // image_index returned by acquire_next_image() to look up the
+    // matching VkImage for blits / barriers. Returns VK_NULL_HANDLE
+    // if the index is out of range.
+    VkImage image_at(uint32_t index) const noexcept
+    {
+        return index < images_.size() ? images_[index] : VK_NULL_HANDLE;
+    }
 
 private:
     Swapchain(const VkContext& ctx, VkSurfaceKHR surface);
