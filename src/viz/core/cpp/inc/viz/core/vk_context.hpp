@@ -13,14 +13,19 @@ namespace viz
 {
 
 // Read-only info about a Vulkan physical device.
+//
+// Returned by VkContext::enumerate_physical_devices(). Use this to discover
+// available GPUs and choose one explicitly via Config::physical_device_index
+// when multiple GPUs are present (e.g. servers with two NVIDIA cards).
 struct PhysicalDeviceInfo
 {
-    uint32_t index = 0;
-    std::string name;
-    uint32_t vendor_id = 0;
-    uint32_t device_id = 0;
-    bool is_discrete = false;
-    bool meets_requirements = false;
+    uint32_t index = 0; // Index in vkEnumeratePhysicalDevices order
+    std::string name; // deviceName from VkPhysicalDeviceProperties
+    uint32_t vendor_id = 0; // PCI vendor ID (e.g. 0x10DE for NVIDIA)
+    uint32_t device_id = 0; // PCI device ID
+    bool is_discrete = false; // True for discrete (dedicated) GPUs
+    bool meets_requirements = false; // True if suitable for VkContext (API 1.2+,
+                                     // queue family, required extensions)
 };
 
 // Vulkan instance + device + queue + pipeline cache for Televiz.
@@ -41,11 +46,24 @@ class VkContext
 public:
     struct Config
     {
+        // Enables VK_LAYER_KHRONOS_validation if available, plus
+        // VK_EXT_debug_utils messenger and best-practices +
+        // synchronization validation features.
         bool enable_validation = false;
+
+        // Additional instance/device extensions to enable beyond the
+        // Televiz-required set.
         std::vector<std::string> instance_extensions;
         std::vector<std::string> device_extensions;
-        // -1 = auto-pick best; otherwise the explicit index from
-        // vkEnumeratePhysicalDevices.
+
+        // Physical device selection.
+        //   -1 (default): auto-pick the best suitable device (NVIDIA discrete
+        //                 GPUs preferred; must support required extensions).
+        //   >=0:          use the device at this index from
+        //                 vkEnumeratePhysicalDevices. The device must still
+        //                 meet Televiz requirements or init() throws. Use
+        //                 enumerate_physical_devices() to discover available
+        //                 indices.
         int physical_device_index = -1;
     };
 
