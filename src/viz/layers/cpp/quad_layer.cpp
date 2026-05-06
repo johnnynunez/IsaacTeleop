@@ -251,20 +251,37 @@ void QuadLayer::submit(const VizBuffer& src, cudaStream_t stream)
     latest_.store(slot, std::memory_order_release);
 }
 
-void QuadLayer::record(VkCommandBuffer cmd, const std::vector<ViewInfo>& views, const RenderTarget& /*target*/)
+void QuadLayer::record_pre_render_pass(VkCommandBuffer cmd, const std::vector<ViewInfo>& /*views*/)
 {
-    require_alive(slots_[0], "record");
+    require_alive(slots_[0], "record_pre_render_pass");
 
-    // Promote latest_ to in_use_. The previous in_use_ slot becomes
-    // free for the next submit(). If no frame has been published yet
-    // (latest_ == kSlotNone), we leave in_use_ as-is — if it's also
-    // kSlotNone, we skip the draw and the framebuffer keeps its
-    // clear value.
+    // Promote latest_ to in_use_ here (rather than in record()) so
+    // the mip blits below, get_wait_semaphores(), and the eventual
+    // record() draw all see the same slot. The previous in_use_
+    // slot becomes free for the next submit(). If no frame has
+    // been published (latest_ == kSlotNone), in_use_ stays as-is
+    // (also kSlotNone on the very first frame) and we skip mip-gen.
     const uint8_t latest = latest_.load(std::memory_order_acquire);
     if (latest != kSlotNone)
     {
         in_use_.store(latest, std::memory_order_release);
     }
+    const uint8_t cur = in_use_.load(std::memory_order_acquire);
+    if (cur == kSlotNone)
+    {
+        return;
+    }
+    // Refresh the mip chain from level 0 (CUDA's write target).
+    // The compositor's wait on cuda_done_writing at TRANSFER stage
+    // holds these blits back until CUDA's level-0 write retires.
+    slots_[cur]->record_mipmap_generation(cmd);
+}
+
+void QuadLayer::record(VkCommandBuffer cmd, const std::vector<ViewInfo>& views, const RenderTarget& /*target*/)
+{
+    require_alive(slots_[0], "record");
+
+    // record_pre_render_pass already promoted latest_ -> in_use_.
     const uint8_t cur = in_use_.load(std::memory_order_acquire);
     if (cur == kSlotNone)
     {
@@ -288,9 +305,8 @@ void QuadLayer::record(VkCommandBuffer cmd, const std::vector<ViewInfo>& views, 
 
 std::vector<LayerBase::WaitSemaphore> QuadLayer::get_wait_semaphores() const
 {
-    // VizCompositor calls record() first (which promotes latest_ ->
-    // in_use_), then this. So in_use_ is the slot the draw will
-    // sample, and that's what we need the GPU to wait on.
+    // record_pre_render_pass has already promoted latest_ -> in_use_,
+    // so in_use_ is the slot we'll sample.
     const uint8_t cur = in_use_.load(std::memory_order_acquire);
     if (cur == kSlotNone || !slots_[cur])
     {
@@ -306,18 +322,24 @@ std::vector<LayerBase::WaitSemaphore> QuadLayer::get_wait_semaphores() const
         WaitSemaphore{
             image.cuda_done_writing(),
             value,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            // Wait at TRANSFER (not FRAGMENT_SHADER): mip generation
+            // runs as vkCmdBlitImage in pre-render-pass and must see
+            // CUDA's level-0 write before reading from it.
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
         },
     };
 }
 
 void QuadLayer::create_sampler()
 {
+    // All slots have the same mip count (same resolution).
+    const uint32_t mip_levels = slots_[0] ? slots_[0]->mip_levels() : 1;
+
     VkSamplerCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     info.magFilter = VK_FILTER_LINEAR;
     info.minFilter = VK_FILTER_LINEAR;
-    info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -328,7 +350,7 @@ void QuadLayer::create_sampler()
     info.compareEnable = VK_FALSE;
     info.compareOp = VK_COMPARE_OP_ALWAYS;
     info.minLod = 0.0f;
-    info.maxLod = 0.0f;
+    info.maxLod = static_cast<float>(mip_levels - 1);
     check_vk(vkCreateSampler(ctx_->device(), &info, nullptr, &sampler_), "vkCreateSampler");
 }
 

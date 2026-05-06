@@ -213,6 +213,16 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "vkBeginCommandBuffer");
 
+    // Pre-render-pass hook: layers that need to run blits / barriers
+    // outside an active render pass (e.g. mipmap generation) record
+    // here. Single shared frame->views is fine — the per-layer
+    // viewport in views[0] is overwritten below per-tile, but
+    // pre-render-pass work doesn't read it.
+    for (LayerBase* layer : visible_layers)
+    {
+        layer->record_pre_render_pass(command_buffer_, frame->views);
+    }
+
     std::array<VkClearValue, 2> clears{};
     clears[0].color = config_.clear_color;
     clears[1].depthStencil = { 1.0f, 0 };

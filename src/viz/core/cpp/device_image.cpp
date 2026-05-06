@@ -99,6 +99,25 @@ VkFormat to_vk_view_format(PixelFormat format)
     throw std::runtime_error("DeviceImage: unsupported PixelFormat");
 }
 
+// Number of mip levels for a 2D image of the given extent.
+// floor(log2(max(w, h))) + 1 produces the chain {full -> 1x1}.
+// For depth (kD32F) we keep 1 — depth attachments don't sample.
+uint32_t compute_mip_levels(Resolution res, PixelFormat fmt)
+{
+    if (fmt == PixelFormat::kD32F)
+    {
+        return 1;
+    }
+    uint32_t max_dim = res.width > res.height ? res.width : res.height;
+    uint32_t levels = 1;
+    while (max_dim > 1)
+    {
+        max_dim >>= 1;
+        ++levels;
+    }
+    return levels;
+}
+
 cudaChannelFormatDesc to_cuda_format(PixelFormat format)
 {
     switch (format)
@@ -137,7 +156,11 @@ std::unique_ptr<DeviceImage> DeviceImage::create(const VkContext& ctx, Resolutio
 }
 
 DeviceImage::DeviceImage(const VkContext& ctx, Resolution resolution, PixelFormat format)
-    : ctx_(&ctx), resolution_(resolution), format_(format), vk_format_(to_vk_view_format(format))
+    : ctx_(&ctx),
+      resolution_(resolution),
+      format_(format),
+      vk_format_(to_vk_view_format(format)),
+      mip_levels_(compute_mip_levels(resolution, format))
 {
 }
 
@@ -264,9 +287,7 @@ void DeviceImage::create_vk_image_with_external_memory()
     info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
     info.format = to_vk_storage_format(format_);
     info.extent = { resolution_.width, resolution_.height, 1 };
-    info.mipLevels = 1; // Single level. If XR distance views show
-                        // moiré, expose mipLevels via Config and
-                        // generate via vkCmdBlitImage pre-render.
+    info.mipLevels = mip_levels_;
     info.arrayLayers = 1;
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -325,7 +346,7 @@ void DeviceImage::create_vk_image_view()
     info.subresourceRange.aspectMask =
         (format_ == PixelFormat::kD32F) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
     info.subresourceRange.baseMipLevel = 0;
-    info.subresourceRange.levelCount = 1;
+    info.subresourceRange.levelCount = mip_levels_;
     info.subresourceRange.baseArrayLayer = 0;
     info.subresourceRange.layerCount = 1;
     check_vk(vkCreateImageView(ctx_->device(), &info, nullptr, &image_view_), "vkCreateImageView");
@@ -458,6 +479,89 @@ void DeviceImage::transition_to_transfer_dst()
     current_layout_ = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 }
 
+void DeviceImage::record_mipmap_generation(VkCommandBuffer cmd)
+{
+    if (mip_levels_ <= 1)
+    {
+        return;
+    }
+
+    const VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    auto barrier = [&](uint32_t base, uint32_t count, VkImageLayout old_layout, VkImageLayout new_layout,
+                       VkAccessFlags src_access, VkAccessFlags dst_access, VkPipelineStageFlags src_stage,
+                       VkPipelineStageFlags dst_stage)
+    {
+        VkImageMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.oldLayout = old_layout;
+        b.newLayout = new_layout;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = image_;
+        b.subresourceRange.aspectMask = aspect;
+        b.subresourceRange.baseMipLevel = base;
+        b.subresourceRange.levelCount = count;
+        b.subresourceRange.baseArrayLayer = 0;
+        b.subresourceRange.layerCount = 1;
+        b.srcAccessMask = src_access;
+        b.dstAccessMask = dst_access;
+        vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &b);
+    };
+
+    // Level 0: SHADER_READ_ONLY -> TRANSFER_SRC (it already has CUDA's data).
+    // Levels 1..N-1: SHADER_READ_ONLY -> TRANSFER_DST (will receive blits).
+    barrier(0, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT);
+    barrier(1, mip_levels_ - 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+    int32_t prev_w = static_cast<int32_t>(resolution_.width);
+    int32_t prev_h = static_cast<int32_t>(resolution_.height);
+    for (uint32_t i = 1; i < mip_levels_; ++i)
+    {
+        const int32_t this_w = prev_w > 1 ? prev_w / 2 : 1;
+        const int32_t this_h = prev_h > 1 ? prev_h / 2 : 1;
+
+        VkImageBlit blit{};
+        blit.srcSubresource.aspectMask = aspect;
+        blit.srcSubresource.mipLevel = i - 1;
+        blit.srcSubresource.baseArrayLayer = 0;
+        blit.srcSubresource.layerCount = 1;
+        blit.srcOffsets[1] = { prev_w, prev_h, 1 };
+        blit.dstSubresource.aspectMask = aspect;
+        blit.dstSubresource.mipLevel = i;
+        blit.dstSubresource.baseArrayLayer = 0;
+        blit.dstSubresource.layerCount = 1;
+        blit.dstOffsets[1] = { this_w, this_h, 1 };
+        vkCmdBlitImage(cmd, image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &blit, VK_FILTER_LINEAR);
+
+        // Flip this level into TRANSFER_SRC for the next iteration's
+        // read. The last level skips this; it'll go straight to
+        // SHADER_READ in the final barrier.
+        if (i + 1 < mip_levels_)
+        {
+            barrier(i, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT);
+        }
+
+        prev_w = this_w;
+        prev_h = this_h;
+    }
+
+    // Restore the image to SHADER_READ_ONLY: levels 0..N-2 are in
+    // TRANSFER_SRC, level N-1 is in TRANSFER_DST. Two barriers.
+    barrier(0, mip_levels_ - 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    barrier(mip_levels_ - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+}
+
 void DeviceImage::run_one_shot_layout_transition(VkImageLayout old_layout,
                                                  VkImageLayout new_layout,
                                                  VkAccessFlags src_access,
@@ -505,7 +609,7 @@ void DeviceImage::run_one_shot_layout_transition(VkImageLayout old_layout,
     barrier.subresourceRange.aspectMask =
         (format_ == PixelFormat::kD32F) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
     barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.levelCount = mip_levels_;
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount = 1;
     barrier.srcAccessMask = src_access;

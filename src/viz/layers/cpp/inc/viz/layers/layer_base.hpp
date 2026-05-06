@@ -77,6 +77,15 @@ public:
     //           layers in XR.
     virtual void record(VkCommandBuffer cmd, const std::vector<ViewInfo>& views, const RenderTarget& target) = 0;
 
+    // Optional: record commands BEFORE vkCmdBeginRenderPass. Use this
+    // for work that must run outside a render pass (image-to-image
+    // blits, layout transitions on sampled textures, etc.). Default:
+    // no-op. The compositor calls this on every visible layer right
+    // after vkBeginCommandBuffer and before vkCmdBeginRenderPass.
+    virtual void record_pre_render_pass(VkCommandBuffer /*cmd*/, const std::vector<ViewInfo>& /*views*/)
+    {
+    }
+
     // Per-frame wait wiring for layers that synchronize against CUDA
     // (or other external) producers via a Vulkan timeline semaphore.
     // VizCompositor concatenates these across all visible layers and

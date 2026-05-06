@@ -103,12 +103,26 @@ public:
     {
         return format_;
     }
+    uint32_t mip_levels() const noexcept
+    {
+        return mip_levels_;
+    }
 
     // Synchronous one-shot layout transitions (vkQueueSubmit +
-    // vkQueueWaitIdle). For tests / one-shot uploads — production
-    // layers record their own barriers in render commands.
+    // vkQueueWaitIdle). Apply to all mip levels at once. For tests
+    // / one-shot uploads — production layers record their own
+    // barriers in render commands.
     void transition_to_shader_read();
     void transition_to_transfer_dst();
+
+    // Records a barriers-and-blit chain that fills mip levels
+    // 1..mip_levels()-1 from level 0 (which CUDA wrote to). Assumes
+    // the image is in SHADER_READ_ONLY_OPTIMAL on entry, leaves it
+    // in SHADER_READ_ONLY_OPTIMAL on exit. Caller is responsible
+    // for ensuring cuda_done_writing has signaled before this runs
+    // (typically via the compositor's wait semaphore at TRANSFER_BIT
+    // stage). Must be called OUTSIDE an active render pass.
+    void record_mipmap_generation(VkCommandBuffer cmd);
 
 private:
     explicit DeviceImage(const VkContext& ctx, Resolution resolution, PixelFormat format);
@@ -131,6 +145,7 @@ private:
     PixelFormat format_ = PixelFormat::kRGBA8;
     VkFormat vk_format_ = VK_FORMAT_R8G8B8A8_UNORM;
     VkImageLayout current_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    uint32_t mip_levels_ = 1;
 
     VkImage image_ = VK_NULL_HANDLE;
     VkDeviceMemory memory_ = VK_NULL_HANDLE;

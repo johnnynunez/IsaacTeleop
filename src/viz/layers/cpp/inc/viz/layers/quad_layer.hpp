@@ -91,6 +91,11 @@ public:
     // yet (kSlotNone — render target keeps its clear value).
     void record(VkCommandBuffer cmd, const std::vector<ViewInfo>& views, const RenderTarget& target) override;
 
+    // Pre-render-pass: generate mip levels 1..N-1 from the in-use
+    // slot's level 0 (which CUDA wrote to). Runs as vkCmdBlitImage
+    // chain; can't run inside an active render pass.
+    void record_pre_render_pass(VkCommandBuffer cmd, const std::vector<ViewInfo>& views) override;
+
     // Layer-side timeline wait: VizCompositor waits on this slot's
     // cuda_done_writing before the fragment shader samples it.
     std::vector<LayerBase::WaitSemaphore> get_wait_semaphores() const override;
