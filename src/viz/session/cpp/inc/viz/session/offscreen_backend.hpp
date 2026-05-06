@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <viz/core/vk.hpp>
 #include <viz/session/display_backend.hpp>
 
 #include <memory>
@@ -32,20 +33,20 @@ public:
 
 private:
     void create_readback_staging();
-    void destroy_readback_staging();
 
     const VkContext* ctx_ = nullptr;
     Resolution extent_{};
     std::unique_ptr<RenderTarget> render_target_;
 
-    // Pre-allocated; reused per readback.
-    VkBuffer readback_buffer_ = VK_NULL_HANDLE;
-    VkDeviceMemory readback_memory_ = VK_NULL_HANDLE;
+    // Pre-allocated; reused per readback. Declared parent-first so
+    // reverse-destruction is correct (memory after buffer/pool).
+    vk::raii::DeviceMemory readback_memory_{ nullptr };
+    vk::raii::Buffer readback_buffer_{ nullptr };
     VkDeviceSize readback_byte_size_ = 0;
 
     // Dedicated cmd buffer so readback never races the compositor's.
-    VkCommandPool readback_command_pool_ = VK_NULL_HANDLE;
-    VkCommandBuffer readback_command_buffer_ = VK_NULL_HANDLE;
+    vk::raii::CommandPool readback_command_pool_{ nullptr };
+    vk::raii::CommandBuffers readback_command_buffers_{ nullptr };
 };
 
 } // namespace viz
