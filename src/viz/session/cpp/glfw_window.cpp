@@ -67,7 +67,7 @@ std::unique_ptr<GlfwWindow> GlfwWindow::create(const vk::raii::Instance& instanc
                                                uint32_t height,
                                                const std::string& title)
 {
-    if (*instance == VK_NULL_HANDLE)
+    if (static_cast<VkInstance>(*instance) == VK_NULL_HANDLE)
     {
         throw std::invalid_argument("GlfwWindow::create: instance is VK_NULL_HANDLE");
     }

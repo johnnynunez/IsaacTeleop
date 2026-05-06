@@ -100,7 +100,7 @@ Resolution OffscreenBackend::current_extent() const
 
 HostImage OffscreenBackend::readback_to_host()
 {
-    if (render_target_ == nullptr || *readback_buffer_ == VK_NULL_HANDLE)
+    if (render_target_ == nullptr || static_cast<VkBuffer>(*readback_buffer_) == VK_NULL_HANDLE)
     {
         throw std::runtime_error("OffscreenBackend::readback_to_host: backend not initialized");
     }

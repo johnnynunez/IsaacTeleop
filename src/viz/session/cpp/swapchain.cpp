@@ -165,7 +165,7 @@ void Swapchain::init(Resolution preferred_size, VkSwapchainKHR old_swapchain)
     catch (...)
     {
         // Drain and reset partially-built state so retry is sane.
-        if (*ctx_->raii_device() != VK_NULL_HANDLE)
+        if (static_cast<VkDevice>(*ctx_->raii_device()) != VK_NULL_HANDLE)
         {
             (void)ctx_->raii_device().waitIdle();
         }
@@ -193,7 +193,7 @@ void Swapchain::create_semaphores()
 
 void Swapchain::destroy()
 {
-    if (ctx_ != nullptr && *ctx_->raii_device() != VK_NULL_HANDLE)
+    if (ctx_ != nullptr && static_cast<VkDevice>(*ctx_->raii_device()) != VK_NULL_HANDLE)
     {
         // Drain so we don't destroy semaphores still referenced by the queue.
         (void)ctx_->raii_device().waitIdle();
@@ -210,7 +210,7 @@ void Swapchain::destroy()
 
 void Swapchain::recreate(Resolution preferred_size)
 {
-    if (*swapchain_ == VK_NULL_HANDLE)
+    if (static_cast<VkSwapchainKHR>(*swapchain_) == VK_NULL_HANDLE)
     {
         init(preferred_size);
         return;
@@ -235,7 +235,7 @@ void Swapchain::recreate(Resolution preferred_size)
 
 std::optional<Swapchain::AcquiredImage> Swapchain::acquire_next_image()
 {
-    if (*swapchain_ == VK_NULL_HANDLE || image_available_.empty())
+    if (static_cast<VkSwapchainKHR>(*swapchain_) == VK_NULL_HANDLE || image_available_.empty())
     {
         return std::nullopt;
     }
@@ -259,7 +259,7 @@ std::optional<Swapchain::AcquiredImage> Swapchain::acquire_next_image()
 
 bool Swapchain::present(uint32_t image_index, VkSemaphore render_done)
 {
-    if (*swapchain_ == VK_NULL_HANDLE)
+    if (static_cast<VkSwapchainKHR>(*swapchain_) == VK_NULL_HANDLE)
     {
         return false;
     }

@@ -114,7 +114,7 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
         vk::raii::CommandBuffer* cmd;
         ~CmdResetGuard()
         {
-            if (cmd != nullptr && **cmd != VK_NULL_HANDLE)
+            if (cmd != nullptr && static_cast<VkCommandBuffer>(**cmd) != VK_NULL_HANDLE)
             {
                 cmd->reset();
             }
