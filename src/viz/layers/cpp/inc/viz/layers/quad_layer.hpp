@@ -6,8 +6,8 @@
 #include <viz/core/device_image.hpp>
 #include <viz/core/viz_buffer.hpp>
 #include <viz/core/viz_types.hpp>
+#include <viz/core/vk.hpp>
 #include <viz/layers/layer_base.hpp>
-#include <vulkan/vulkan.h>
 
 #include <array>
 #include <atomic>
@@ -132,15 +132,18 @@ private:
     // One DeviceImage per mailbox slot.
     std::array<std::unique_ptr<DeviceImage>, kSlotCount> slots_;
 
-    VkSampler sampler_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout descriptor_set_layout_ = VK_NULL_HANDLE;
-    VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
-    VkPipeline pipeline_ = VK_NULL_HANDLE;
-
-    VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
+    // Declared parent-first so reverse-destruction is correct
+    // (descriptor_pool_ must outlive descriptor_sets_; pipeline must
+    // outlive pipeline_layout_; pipeline_layout_ must outlive
+    // descriptor_set_layout_).
+    vk::raii::Sampler sampler_{ nullptr };
+    vk::raii::DescriptorSetLayout descriptor_set_layout_{ nullptr };
+    vk::raii::PipelineLayout pipeline_layout_{ nullptr };
+    vk::raii::Pipeline pipeline_{ nullptr };
+    vk::raii::DescriptorPool descriptor_pool_{ nullptr };
     // One descriptor set per slot, each binding the corresponding
     // DeviceImage's sRGB view. record() picks the one for in_use_.
-    std::array<VkDescriptorSet, kSlotCount> descriptor_sets_{};
+    vk::raii::DescriptorSets descriptor_sets_{ nullptr };
 
     // Mailbox state. Both atomic so producer and renderer can
     // touch them without locks.
