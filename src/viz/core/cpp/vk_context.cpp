@@ -300,20 +300,21 @@ void VkContext::create_instance(const Config& config)
 
     if (validation_enabled_)
     {
-        // Instance pNext chain:
-        //   InstanceCreateInfo
-        //     → DebugUtilsMessengerCreateInfoEXT (catches errors emitted
-        //                                         during vkCreateInstance)
-        //     → ValidationFeaturesEXT (best-practices + sync validation;
-        //                              valid as pNext of InstanceCreateInfo,
-        //                              NOT of DebugUtilsMessengerCreateInfoEXT).
-        vk::StructureChain<vk::InstanceCreateInfo, vk::DebugUtilsMessengerCreateInfoEXT, vk::ValidationFeaturesEXT> chain{
+        // Both ValidationFeaturesEXT and DebugUtilsMessengerCreateInfoEXT
+        // extend VkInstanceCreateInfo. The loader walks the entire pNext
+        // list and dispatches each struct by sType, so chain order is
+        // not semantically meaningful — but vulkan-hpp's StructureChain
+        // physically links them in declaration order, so we list them
+        // in the order they conceptually attach to the instance create
+        // info to keep the linkage easy to reason about.
+        vk::ValidationFeaturesEXT validation_features{
+            .enabledValidationFeatureCount = static_cast<uint32_t>(std::size(enables)),
+            .pEnabledValidationFeatures = enables,
+        };
+        vk::StructureChain<vk::InstanceCreateInfo, vk::ValidationFeaturesEXT, vk::DebugUtilsMessengerCreateInfoEXT> chain{
             base_info,
+            validation_features,
             debug_create_info,
-            vk::ValidationFeaturesEXT{
-                .enabledValidationFeatureCount = static_cast<uint32_t>(std::size(enables)),
-                .pEnabledValidationFeatures = enables,
-            },
         };
         instance_ = vk::raii::Instance{ context_, chain.get<vk::InstanceCreateInfo>() };
         debug_messenger_ = vk::raii::DebugUtilsMessengerEXT{ instance_, debug_create_info };
