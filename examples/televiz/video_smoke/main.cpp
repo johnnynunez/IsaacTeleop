@@ -47,7 +47,7 @@ struct Video
     std::chrono::steady_clock::time_point next_present{};
 };
 
-void submit_to_layer(viz::QuadLayer& layer, const viz_smoke::DecodedFrame& f)
+void submit_to_layer(viz::QuadLayer& layer, const viz_smoke::DecodedFrame& f, cudaStream_t stream)
 {
     viz::VizBuffer src{};
     src.data = f.data;
@@ -56,7 +56,7 @@ void submit_to_layer(viz::QuadLayer& layer, const viz_smoke::DecodedFrame& f)
     src.format = viz::PixelFormat::kRGBA8;
     src.pitch = static_cast<size_t>(f.width) * 4;
     src.space = viz::MemorySpace::kDevice;
-    layer.submit(src);
+    layer.submit(src, stream);
 }
 
 // Drain one chunk of the file and feed it. Rewinds on EOF (a read
@@ -184,7 +184,7 @@ int main(int argc, char** argv)
             layer_cfg.resolution = { videos[i]->first_frame->width, videos[i]->first_frame->height };
             layer_cfg.mip_lod_bias = lod_bias;
             videos[i]->layer = session->add_layer<viz::QuadLayer>(*ctx, render_pass, layer_cfg);
-            submit_to_layer(*videos[i]->layer, *videos[i]->first_frame);
+            submit_to_layer(*videos[i]->layer, *videos[i]->first_frame, videos[i]->player.stream());
             videos[i]->in_flight = std::move(videos[i]->first_frame);
 
             // Pull source FPS from the H.264 VUI; fall back to 30 if
@@ -218,7 +218,7 @@ int main(int argc, char** argv)
                     {
                         if (auto next = v->player.try_pop())
                         {
-                            submit_to_layer(*v->layer, *next);
+                            submit_to_layer(*v->layer, *next, v->player.stream());
                             v->in_flight = std::move(next);
                         }
                         v->next_present += v->frame_period;

@@ -123,6 +123,26 @@ NvdecPlayer::NvdecPlayer()
     CtxScope scope(ctx_);
     try
     {
+        // Per-player non-blocking stream so multiple players don't
+        // serialize their NPP / kernel / upload work on the default
+        // stream. cudaStreamNonBlocking decouples from stream 0
+        // (no implicit wait either direction).
+        check_cuda(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking), "cudaStreamCreateWithFlags");
+
+        // NPP stream context — populated once at construction so
+        // feed() doesn't pay cudaGetDeviceProperties per frame.
+        cudaDeviceProp props{};
+        cudaGetDeviceProperties(&props, 0);
+        npp_ctx_.hStream = stream_;
+        npp_ctx_.nCudaDeviceId = 0;
+        npp_ctx_.nMultiProcessorCount = props.multiProcessorCount;
+        npp_ctx_.nMaxThreadsPerMultiProcessor = props.maxThreadsPerMultiProcessor;
+        npp_ctx_.nMaxThreadsPerBlock = props.maxThreadsPerBlock;
+        npp_ctx_.nSharedMemPerBlock = props.sharedMemPerBlock;
+        cudaDeviceGetAttribute(&npp_ctx_.nCudaDevAttrComputeCapabilityMajor, cudaDevAttrComputeCapabilityMajor, 0);
+        cudaDeviceGetAttribute(&npp_ctx_.nCudaDevAttrComputeCapabilityMinor, cudaDevAttrComputeCapabilityMinor, 0);
+        cudaStreamGetFlags(stream_, &npp_ctx_.nStreamFlags);
+
         // Display-order output (default). bLowLatency / bForceZeroLatency
         // off so B-frames are buffered and emitted in display order.
         decoder_ = std::make_unique<NvDecoder>(ctx_,
@@ -130,6 +150,11 @@ NvdecPlayer::NvdecPlayer()
     }
     catch (...)
     {
+        if (stream_ != nullptr)
+        {
+            cudaStreamDestroy(stream_);
+            stream_ = nullptr;
+        }
         cuDevicePrimaryCtxRelease(device_);
         ctx_ = nullptr;
         throw;
@@ -152,6 +177,11 @@ NvdecPlayer::~NvdecPlayer()
         rgb_scratch_ = nullptr;
     }
     decoder_.reset();
+    if (stream_ != nullptr)
+    {
+        cudaStreamDestroy(stream_);
+        stream_ = nullptr;
+    }
     if (ctx_ != nullptr)
     {
         cuDevicePrimaryCtxRelease(device_);
@@ -254,12 +284,12 @@ void NvdecPlayer::feed(const uint8_t* data, size_t size)
 
         const Npp8u* nv12_planes[2] = { nv12, nv12 + luma_size };
         const NppiSize roi = { w, h };
-        check_npp(nppiNV12ToRGB_709CSC_8u_P2C3R(nv12_planes, pitch, rgb_scratch_, w * 3, roi),
-                  "nppiNV12ToRGB_709CSC_8u_P2C3R");
+        check_npp(nppiNV12ToRGB_709CSC_8u_P2C3R_Ctx(nv12_planes, pitch, rgb_scratch_, w * 3, roi, npp_ctx_),
+                  "nppiNV12ToRGB_709CSC_8u_P2C3R_Ctx");
 
         const int block = 256;
         const int grid = (static_cast<int>(npixels) + block - 1) / block;
-        rgb_to_rgba_kernel<<<grid, block>>>(rgb_scratch_, rgba, static_cast<int>(npixels));
+        rgb_to_rgba_kernel<<<grid, block, 0, stream_>>>(rgb_scratch_, rgba, static_cast<int>(npixels));
         const cudaError_t kerr = cudaGetLastError();
         decoder_->UnlockFrame(&nv12);
         if (kerr != cudaSuccess)

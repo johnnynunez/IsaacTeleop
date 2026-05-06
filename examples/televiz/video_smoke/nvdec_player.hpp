@@ -8,6 +8,7 @@
 #include <cuda.h>
 #include <deque>
 #include <memory>
+#include <nppdefs.h>
 #include <vector>
 
 class NvDecoder;
@@ -67,6 +68,14 @@ public:
     // fall back to a default cadence in that case.
     double frame_period_seconds() const noexcept;
 
+    // Per-player CUDA stream. Pass this to QuadLayer::submit so the
+    // upload memcpy serializes with our NPP + kernel work but runs
+    // in parallel with other players' streams.
+    cudaStream_t stream() const noexcept
+    {
+        return stream_;
+    }
+
     // Called by ~DecodedFrame to return its buffer to the pool.
     // Public because the back-pointer in DecodedFrame needs it; not
     // intended for direct caller use.
@@ -80,6 +89,8 @@ private:
 
     CUdevice device_ = 0;
     CUcontext ctx_ = nullptr;
+    cudaStream_t stream_ = nullptr;
+    NppStreamContext npp_ctx_{};
     std::unique_ptr<NvDecoder> decoder_;
 
     std::deque<std::unique_ptr<DecodedFrame>> queue_;
