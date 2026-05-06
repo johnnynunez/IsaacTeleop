@@ -129,6 +129,7 @@ private:
     bool initialized_ = false;
     bool validation_enabled_ = false;
     VkInstance instance_ = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT debug_messenger_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
     VkDevice device_ = VK_NULL_HANDLE;
     uint32_t queue_family_index_ = UINT32_MAX;

@@ -51,6 +51,28 @@ bool is_validation_layer_available()
     return false;
 }
 
+VKAPI_ATTR VkBool32 VKAPI_CALL debug_messenger_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+                                                        VkDebugUtilsMessageTypeFlagsEXT /*types*/,
+                                                        const VkDebugUtilsMessengerCallbackDataEXT* data,
+                                                        void* /*user*/)
+{
+    const char* level = "verbose";
+    if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+    {
+        level = "ERROR";
+    }
+    else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
+    {
+        level = "warn";
+    }
+    else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT)
+    {
+        level = "info";
+    }
+    std::cerr << "[Vulkan " << level << "] " << (data && data->pMessage ? data->pMessage : "(null)") << std::endl;
+    return VK_FALSE;
+}
+
 bool device_supports_extensions(VkPhysicalDevice device, const std::vector<const char*>& required)
 {
     uint32_t count = 0;
@@ -215,6 +237,16 @@ void VkContext::destroy()
         vkDestroyDevice(device_, nullptr);
         device_ = VK_NULL_HANDLE;
     }
+    if (debug_messenger_ != VK_NULL_HANDLE && instance_ != VK_NULL_HANDLE)
+    {
+        auto vkDestroyDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+            vkGetInstanceProcAddr(instance_, "vkDestroyDebugUtilsMessengerEXT"));
+        if (vkDestroyDebugUtilsMessengerEXT != nullptr)
+        {
+            vkDestroyDebugUtilsMessengerEXT(instance_, debug_messenger_, nullptr);
+        }
+        debug_messenger_ = VK_NULL_HANDLE;
+    }
     if (instance_ != VK_NULL_HANDLE)
     {
         vkDestroyInstance(instance_, nullptr);
@@ -296,10 +328,42 @@ void VkContext::create_instance(const Config& config)
     }
 
     std::vector<const char*> instance_extensions;
-    instance_extensions.reserve(config.instance_extensions.size());
+    instance_extensions.reserve(config.instance_extensions.size() + 1);
     for (const auto& s : config.instance_extensions)
     {
         instance_extensions.push_back(s.c_str());
+    }
+    if (validation_enabled_)
+    {
+        instance_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    }
+
+    // Best-practices + sync validation are off by default; enabling
+    // them costs a bit of perf but catches a wide class of bugs the
+    // base layer misses.
+    const VkValidationFeatureEnableEXT enables[] = {
+        VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT,
+        VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT,
+    };
+    VkValidationFeaturesEXT validation_features{};
+    validation_features.sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
+    validation_features.enabledValidationFeatureCount = sizeof(enables) / sizeof(enables[0]);
+    validation_features.pEnabledValidationFeatures = enables;
+
+    // Create-time messenger via pNext catches errors from
+    // vkCreateInstance itself (the persistent messenger created
+    // below misses those).
+    VkDebugUtilsMessengerCreateInfoEXT debug_create_info{};
+    debug_create_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+    debug_create_info.messageSeverity =
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    debug_create_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                                    VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                                    VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    debug_create_info.pfnUserCallback = debug_messenger_callback;
+    if (validation_enabled_)
+    {
+        debug_create_info.pNext = &validation_features;
     }
 
     VkInstanceCreateInfo create_info{};
@@ -309,11 +373,25 @@ void VkContext::create_instance(const Config& config)
     create_info.ppEnabledLayerNames = layers.data();
     create_info.enabledExtensionCount = static_cast<uint32_t>(instance_extensions.size());
     create_info.ppEnabledExtensionNames = instance_extensions.data();
+    if (validation_enabled_)
+    {
+        create_info.pNext = &debug_create_info;
+    }
 
     const VkResult result = vkCreateInstance(&create_info, nullptr, &instance_);
     if (result != VK_SUCCESS)
     {
         throw std::runtime_error("vkCreateInstance failed: VkResult=" + std::to_string(result));
+    }
+
+    if (validation_enabled_)
+    {
+        auto vkCreateDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+            vkGetInstanceProcAddr(instance_, "vkCreateDebugUtilsMessengerEXT"));
+        if (vkCreateDebugUtilsMessengerEXT != nullptr)
+        {
+            (void)vkCreateDebugUtilsMessengerEXT(instance_, &debug_create_info, nullptr, &debug_messenger_);
+        }
     }
 }
 
