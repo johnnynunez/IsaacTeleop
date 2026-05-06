@@ -46,6 +46,18 @@ bool is_validation_layer_available()
     return false;
 }
 
+bool is_instance_extension_available(const char* name)
+{
+    for (const auto& ext : vk::enumerateInstanceExtensionProperties())
+    {
+        if (std::strcmp(ext.extensionName, name) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 VKAPI_ATTR VkBool32 VKAPI_CALL debug_messenger_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                                         VkDebugUtilsMessageTypeFlagsEXT /*types*/,
                                                         const VkDebugUtilsMessengerCallbackDataEXT* data,
@@ -260,15 +272,24 @@ void VkContext::create_instance(const Config& config)
     }
 
     std::vector<const char*> instance_extensions;
-    instance_extensions.reserve(config.instance_extensions.size() + 1);
+    instance_extensions.reserve(config.instance_extensions.size() + 2);
     for (const auto& s : config.instance_extensions)
     {
         instance_extensions.push_back(s.c_str());
     }
+    bool validation_features_enabled = false;
     if (validation_enabled_)
     {
         instance_extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-        instance_extensions.push_back(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+        // VK_EXT_validation_features is bundled with recent SDKs but not
+        // every loader/driver advertises it. Gate the pNext chain on
+        // availability so vkCreateInstance doesn't fail when validation
+        // is requested but this extension isn't present.
+        if (is_instance_extension_available(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME))
+        {
+            instance_extensions.push_back(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+            validation_features_enabled = true;
+        }
     }
 
     const vk::ValidationFeatureEnableEXT enables[] = {
@@ -279,15 +300,21 @@ void VkContext::create_instance(const Config& config)
     // Plain create-info (no pNext) — same struct serves both the
     // chained create-time messenger and the persistent post-create
     // messenger, since neither needs further chained structures.
+    //
+    // pfnUserCallback's declared type varies across vk-hpp SDKs: newer
+    // versions wrap it as vk::PFN_DebugUtilsMessengerCallbackEXT (with
+    // vk::Flags<...> for the messageType parameter), older versions
+    // leave it as the raw PFN_vkDebugUtilsMessengerCallbackEXT C
+    // typedef. Our callback uses the C signature; reinterpret_cast
+    // through decltype lets the same code compile against both. The
+    // ABI is identical (vk::Flags<T> is a trivial uint32_t wrapper).
+    using PfnUserCallbackT = decltype(std::declval<vk::DebugUtilsMessengerCreateInfoEXT>().pfnUserCallback);
     const vk::DebugUtilsMessengerCreateInfoEXT debug_create_info{
         .messageSeverity =
             vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning | vk::DebugUtilsMessageSeverityFlagBitsEXT::eError,
         .messageType = vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral | vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation |
                        vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance,
-        // C ABI callback; vk::Flags wrappers are layout-compatible
-        // with the raw C flag types but the function-pointer type
-        // signatures aren't, hence the reinterpret_cast.
-        .pfnUserCallback = reinterpret_cast<vk::PFN_DebugUtilsMessengerCallbackEXT>(debug_messenger_callback),
+        .pfnUserCallback = reinterpret_cast<PfnUserCallbackT>(debug_messenger_callback),
     };
 
     const vk::InstanceCreateInfo base_info{
@@ -298,7 +325,7 @@ void VkContext::create_instance(const Config& config)
         .ppEnabledExtensionNames = instance_extensions.data(),
     };
 
-    if (validation_enabled_)
+    if (validation_features_enabled)
     {
         // Both ValidationFeaturesEXT and DebugUtilsMessengerCreateInfoEXT
         // extend VkInstanceCreateInfo. The loader walks the entire pNext
@@ -316,6 +343,15 @@ void VkContext::create_instance(const Config& config)
             validation_features,
             debug_create_info,
         };
+        instance_ = vk::raii::Instance{ context_, chain.get<vk::InstanceCreateInfo>() };
+        debug_messenger_ = vk::raii::DebugUtilsMessengerEXT{ instance_, debug_create_info };
+    }
+    else if (validation_enabled_)
+    {
+        // Validation layer available, but VK_EXT_validation_features is
+        // not — chain only the create-time messenger.
+        vk::StructureChain<vk::InstanceCreateInfo, vk::DebugUtilsMessengerCreateInfoEXT> chain{ base_info,
+                                                                                                debug_create_info };
         instance_ = vk::raii::Instance{ context_, chain.get<vk::InstanceCreateInfo>() };
         debug_messenger_ = vk::raii::DebugUtilsMessengerEXT{ instance_, debug_create_info };
     }
