@@ -60,6 +60,11 @@ public:
         std::string name = "QuadLayer";
         Resolution resolution{};
         PixelFormat format = PixelFormat::kRGBA8;
+        // VkSamplerCreateInfo::mipLodBias. Positive values bias toward
+        // higher (blurrier) mip levels — trades sharpness for less
+        // aliasing on high-frequency content. 0 = GPU-computed LOD,
+        // typical anti-alias values are 0.5..1.5.
+        float mip_lod_bias = 0.0f;
     };
 
     // Builds the 3 DeviceImages + pipeline up front. Throws

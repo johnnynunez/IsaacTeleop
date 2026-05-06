@@ -80,11 +80,29 @@ void feed_one_chunk(Video& v, std::vector<uint8_t>& chunk)
 
 int main(int argc, char** argv)
 {
-    if (argc < 2)
+    float lod_bias = 0.0f;
+    std::vector<const char*> paths;
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string a = argv[i];
+        const std::string prefix = "--lod-bias=";
+        if (a.rfind(prefix, 0) == 0)
+        {
+            lod_bias = std::stof(a.substr(prefix.size()));
+        }
+        else
+        {
+            paths.push_back(argv[i]);
+        }
+    }
+    if (paths.empty())
     {
         std::fprintf(stderr,
-                     "usage: %s <video.h264> [<video.h264> ...]\n"
-                     "  Each input must be raw H.264 Annex B. To convert from MP4:\n"
+                     "usage: %s [--lod-bias=N] <video.h264> [<video.h264> ...]\n"
+                     "  --lod-bias=N : sampler mipLodBias (default 0). Positive values\n"
+                     "                 bias toward blurrier mip levels — try 0.5..1.5\n"
+                     "                 to reduce shimmer on fine detail.\n"
+                     "  Inputs must be raw H.264 Annex B. To convert from MP4:\n"
                      "    ffmpeg -i in.mp4 -c:v copy -bsf:v h264_mp4toannexb -f h264 out.h264\n",
                      argv[0]);
         return EXIT_FAILURE;
@@ -92,13 +110,12 @@ int main(int argc, char** argv)
 
     try
     {
-        const int n = argc - 1;
         std::vector<std::unique_ptr<Video>> videos;
-        videos.reserve(n);
-        for (int i = 0; i < n; ++i)
+        videos.reserve(paths.size());
+        for (const char* p : paths)
         {
             auto v = std::make_unique<Video>();
-            v->path = argv[i + 1];
+            v->path = p;
             v->file.open(v->path, std::ios::binary);
             if (!v->file)
             {
@@ -106,6 +123,7 @@ int main(int argc, char** argv)
             }
             videos.push_back(std::move(v));
         }
+        std::printf("lod_bias = %.2f\n", lod_bias);
 
         // Prime each player to its first frame so we know the resolutions
         // before sizing the window + layers.
@@ -155,6 +173,7 @@ int main(int argc, char** argv)
             viz::QuadLayer::Config layer_cfg;
             layer_cfg.name = "video_" + std::to_string(i);
             layer_cfg.resolution = { videos[i]->first_frame->width, videos[i]->first_frame->height };
+            layer_cfg.mip_lod_bias = lod_bias;
             videos[i]->layer = session->add_layer<viz::QuadLayer>(*ctx, render_pass, layer_cfg);
             submit_to_layer(*videos[i]->layer, *videos[i]->first_frame);
             videos[i]->in_flight = std::move(videos[i]->first_frame);

@@ -362,6 +362,7 @@ void QuadLayer::create_sampler()
     info.unnormalizedCoordinates = VK_FALSE;
     info.compareEnable = VK_FALSE;
     info.compareOp = VK_COMPARE_OP_ALWAYS;
+    info.mipLodBias = config_.mip_lod_bias;
     info.minLod = 0.0f;
     info.maxLod = static_cast<float>(mip_levels - 1);
     check_vk(vkCreateSampler(ctx_->device(), &info, nullptr, &sampler_), "vkCreateSampler");
