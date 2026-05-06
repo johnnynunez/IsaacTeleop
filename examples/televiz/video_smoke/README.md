@@ -44,11 +44,13 @@ The video loops on EOF.
 ## Limitations
 
 - H.264 only (NVDEC supports HEVC/AV1 too; would need codec selection).
-- Color conversion auto-selects between BT.709 limited-range (default for
-  general H.264 files: x264, ffmpeg, broadcast, streaming) and BT.601
-  full-range (typical of embedded camera encoders that tag
-  `video_full_range_flag=1`) using the H.264 VUI on the first frame.
-  Mistagged sources will look wrong; pass `force_full_range` if added later.
+- Color conversion is BT.709 limited-range only (NPP's
+  `nppiNV12ToRGB_709CSC_8u_P2C3R` plus a tiny RGB→RGBA pack kernel).
+  This is correct for ~all general-purpose H.264 (x264, ffmpeg,
+  broadcast, streaming). Embedded camera encoders that emit BT.601
+  full-range (OAK-D etc.) will look slightly washed out; the original
+  `examples/camera_streamer/operators/nv_stream_decoder/` op auto-detects
+  via the H.264 VUI flag.
 - No audio.
 - Single-threaded decode + render. NVDEC is async on the GPU but the decode
   call blocks the render loop briefly per frame.

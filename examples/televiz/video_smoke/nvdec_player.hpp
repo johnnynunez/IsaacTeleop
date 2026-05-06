@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cuda.h>
-#include <cuda_runtime.h>
 #include <deque>
 #include <memory>
 
@@ -15,34 +14,26 @@ class NvDecoder;
 namespace viz_smoke
 {
 
-// RAII for a cudaMalloc'd RGBA8 buffer.
-struct OwnedRgba
+// One decoded RGBA8 frame on GPU memory, owns its own allocation.
+struct DecodedFrame
 {
     uint8_t* data = nullptr;
     uint32_t width = 0;
     uint32_t height = 0;
 
-    OwnedRgba() = default;
-    OwnedRgba(uint8_t* p, uint32_t w, uint32_t h) noexcept : data(p), width(w), height(h)
-    {
-    }
-    ~OwnedRgba();
-    OwnedRgba(const OwnedRgba&) = delete;
-    OwnedRgba& operator=(const OwnedRgba&) = delete;
-    OwnedRgba(OwnedRgba&& o) noexcept : data(o.data), width(o.width), height(o.height)
-    {
-        o.data = nullptr;
-        o.width = 0;
-        o.height = 0;
-    }
-    OwnedRgba& operator=(OwnedRgba&& o) noexcept;
+    DecodedFrame() = default;
+    DecodedFrame(uint8_t* d, uint32_t w, uint32_t h) noexcept;
+    ~DecodedFrame();
+    DecodedFrame(const DecodedFrame&) = delete;
+    DecodedFrame& operator=(const DecodedFrame&) = delete;
+    DecodedFrame(DecodedFrame&& o) noexcept;
+    DecodedFrame& operator=(DecodedFrame&& o) noexcept;
 };
 
-// Decodes an H.264 Annex B stream into a queue of device-resident
-// RGBA8 frames in display order. NvDecoder's Decode() returns N
-// frames at a time (especially after a B-frame group); we drain all
-// of them per call and queue them. Callers pop one frame per render
-// iteration via try_pop().
+// H.264 bitstream chunk -> queue of RGBA8 frames in display order.
+// Uses NVDEC for decode (via the NVIDIA Video Codec SDK's NvDecoder
+// wrapper) and NPP for NV12 -> RGB (BT.709 limited-range) plus a
+// small CUDA kernel for the RGB -> RGBA alpha pack.
 class NvdecPlayer
 {
 public:
@@ -52,39 +43,24 @@ public:
     NvdecPlayer(const NvdecPlayer&) = delete;
     NvdecPlayer& operator=(const NvdecPlayer&) = delete;
 
-    // Push one Annex B NAL unit (with start code) into the decoder.
-    // Drains any newly-available frames into the internal queue.
-    // Returns true if at least one frame is now queued (or already
-    // was). NAL units that only update parameter sets (SPS/PPS) or
-    // contain partial-picture data legitimately produce no frames —
-    // keep feeding.
-    bool feed(const uint8_t* data, size_t size);
+    // Push a chunk of H.264 bytes (Annex B or MP4-mode — NvDecoder's
+    // parser handles either). Drains all decoded frames into the queue.
+    void feed(const uint8_t* data, size_t size);
 
-    // Pop the next display-order frame. Returns nullptr if the queue
-    // is empty. Caller takes ownership and must keep the OwnedRgba
-    // alive for at least one full render() cycle after submit() —
-    // QuadLayer::submit issues an async memcpy from the buffer that
-    // only completes during the next render's GPU wait.
-    std::unique_ptr<OwnedRgba> try_pop();
+    // Pop the next display-order frame, or nullptr if the queue is empty.
+    std::unique_ptr<DecodedFrame> try_pop();
 
     size_t queued_frame_count() const noexcept
     {
-        return ready_.size();
+        return queue_.size();
     }
 
 private:
-    CUdevice cu_device_ = 0;
-    CUcontext cu_context_ = nullptr;
+    CUdevice device_ = 0;
+    CUcontext ctx_ = nullptr;
     std::unique_ptr<NvDecoder> decoder_;
 
-    std::deque<std::unique_ptr<OwnedRgba>> ready_;
-
-    // VUI-driven choice of NV12->RGBA kernel. Read once after the
-    // first decoded frame; the bitstream's color signaling shouldn't
-    // change mid-stream in any sane file. Default = limited BT.709
-    // (the H.264 default per the spec) until we know otherwise.
-    bool color_range_detected_ = false;
-    bool use_full_range_ = false;
+    std::deque<std::unique_ptr<DecodedFrame>> queue_;
 };
 
 } // namespace viz_smoke

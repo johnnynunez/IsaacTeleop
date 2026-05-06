@@ -1,11 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Plays an H.264 Annex B file into a Televiz QuadLayer:
+// Plays an H.264 file into a Televiz QuadLayer:
 //   ./viz_video_smoke /path/to/video.h264
-// The example loops the stream on EOF.
 
-#include "h264_file_reader.hpp"
 #include "nvdec_player.hpp"
 
 #include <viz/core/vk_context.hpp>
@@ -16,33 +14,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace
 {
 
-// Pull NAL units out of the demuxer until NvDecoder produces at
-// least one queued frame. Returns false only if the file is empty.
-bool prime_first_frame(viz_smoke::H264FileReader& reader, viz_smoke::NvdecPlayer& player)
-{
-    for (int safety = 0; safety < 4096; ++safety)
-    {
-        const uint8_t* nalu = nullptr;
-        size_t nalu_size = 0;
-        if (!reader.next_nalu(&nalu, &nalu_size))
-        {
-            return false;
-        }
-        if (player.feed(nalu, nalu_size))
-        {
-            return true;
-        }
-    }
-    return false;
-}
+constexpr size_t kChunkBytes = 64 * 1024;
 
-void submit_to_layer(viz::QuadLayer& layer, const viz_smoke::OwnedRgba& f)
+void submit_to_layer(viz::QuadLayer& layer, const viz_smoke::DecodedFrame& f)
 {
     viz::VizBuffer src{};
     src.data = f.data;
@@ -52,6 +34,25 @@ void submit_to_layer(viz::QuadLayer& layer, const viz_smoke::OwnedRgba& f)
     src.pitch = static_cast<size_t>(f.width) * 4;
     src.space = viz::MemorySpace::kDevice;
     layer.submit(src);
+}
+
+// Block until the decoder produces at least one queued frame OR
+// the stream ends. NvDecoder needs to see SPS/PPS + an IDR before
+// it can emit anything, which can take many NAL units.
+std::unique_ptr<viz_smoke::DecodedFrame> prime_first_frame(std::ifstream& f, viz_smoke::NvdecPlayer& player)
+{
+    std::vector<uint8_t> chunk(kChunkBytes);
+    while (player.queued_frame_count() == 0 && f)
+    {
+        f.read(reinterpret_cast<char*>(chunk.data()), chunk.size());
+        const auto got = static_cast<size_t>(f.gcount());
+        if (got == 0)
+        {
+            break;
+        }
+        player.feed(chunk.data(), got);
+    }
+    return player.try_pop();
 }
 
 } // namespace
@@ -70,68 +71,60 @@ int main(int argc, char** argv)
 
     try
     {
-        viz_smoke::H264FileReader reader(argv[1]);
+        std::ifstream file(argv[1], std::ios::binary);
+        if (!file)
+        {
+            throw std::runtime_error(std::string("cannot open ") + argv[1]);
+        }
         viz_smoke::NvdecPlayer player;
 
-        if (!prime_first_frame(reader, player))
+        auto first = prime_first_frame(file, player);
+        if (first == nullptr)
         {
-            throw std::runtime_error("video_smoke: never produced a decoded frame; bad input?");
+            throw std::runtime_error("never produced a decoded frame; bad input?");
         }
-        auto first = player.try_pop();
 
         viz::VizSession::Config cfg{};
         cfg.mode = viz::DisplayMode::kWindow;
         cfg.window_width = first->width;
         cfg.window_height = first->height;
         cfg.app_name = "viz_video_smoke";
-        cfg.clear_color[0] = 0.0f;
-        cfg.clear_color[1] = 0.0f;
-        cfg.clear_color[2] = 0.0f;
-        cfg.clear_color[3] = 1.0f;
 
         auto session = viz::VizSession::create(cfg);
-        const viz::VkContext* ctx = session->get_vk_context();
-        const VkRenderPass render_pass = session->get_render_pass();
-
         viz::QuadLayer::Config layer_cfg;
         layer_cfg.name = "video";
         layer_cfg.resolution = { first->width, first->height };
-        auto* layer = session->add_layer<viz::QuadLayer>(*ctx, render_pass, layer_cfg);
+        auto* layer =
+            session->add_layer<viz::QuadLayer>(*session->get_vk_context(), session->get_render_pass(), layer_cfg);
 
         submit_to_layer(*layer, *first);
+        // Hold the most recently submitted buffer alive across one full
+        // render cycle. QuadLayer::submit issues an async cudaMemcpy from
+        // it that must complete before cudaFree (in ~DecodedFrame).
+        std::unique_ptr<viz_smoke::DecodedFrame> in_flight = std::move(first);
 
-        // Holds the buffer most recently submitted. QuadLayer::submit
-        // schedules an async cudaMemcpy from this buffer into the
-        // mailbox slot; the renderer waits on cuda_done_writing
-        // before sampling. By keeping the buffer alive until we
-        // submit a different one (after a full render cycle), the
-        // memcpy is guaranteed to have completed before cudaFree
-        // (in ~OwnedRgba) runs.
-        std::unique_ptr<viz_smoke::OwnedRgba> in_flight = std::move(first);
-
+        std::vector<uint8_t> chunk(kChunkBytes);
         while (!session->should_close())
         {
-            // Top up the decoder until it has at least one queued
-            // frame OR we run out of bitstream. Bound the inner loop
-            // so a malformed file can't spin us forever.
-            for (int safety = 0; safety < 256 && player.queued_frame_count() == 0; ++safety)
+            // Top up the decoder until it has at least one queued frame
+            // (or the file ends). Bound the inner loop so a malformed
+            // file can't trap us.
+            for (int safety = 0; safety < 256 && player.queued_frame_count() == 0 && file; ++safety)
             {
-                const uint8_t* nalu = nullptr;
-                size_t nalu_size = 0;
-                if (!reader.next_nalu(&nalu, &nalu_size))
+                file.read(reinterpret_cast<char*>(chunk.data()), chunk.size());
+                const auto got = static_cast<size_t>(file.gcount());
+                if (got == 0)
                 {
-                    break;
+                    file.clear();
+                    file.seekg(0);
+                    continue; // loop the stream
                 }
-                player.feed(nalu, nalu_size);
+                player.feed(chunk.data(), got);
             }
 
             if (auto next = player.try_pop())
             {
                 submit_to_layer(*layer, *next);
-                // Drop the previous buffer here. Its memcpy completed
-                // during the last session->render() — the mailbox's
-                // cuda_done_writing wait + the trailing fence wait
-                // together guarantee no GPU work still references it.
                 in_flight = std::move(next);
             }
 

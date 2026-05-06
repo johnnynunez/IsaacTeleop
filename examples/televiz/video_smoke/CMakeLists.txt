@@ -61,9 +61,7 @@ endif()
 
 add_executable(viz_video_smoke
     main.cpp
-    h264_file_reader.cpp
-    nvdec_player.cpp
-    nv12_to_rgba.cu
+    nvdec_player.cu
     ${_NVC_SDK_DIR}/NvDecoder/NvDecoder.cpp
     ${_NVC_SDK_DIR}/Logger.cpp
 )
@@ -80,6 +78,7 @@ target_link_libraries(viz_video_smoke PRIVATE
     viz::core
     cuda
     CUDA::cudart
+    CUDA::nppicc
     ${NVCUVID_LIBRARY}
 )
 
