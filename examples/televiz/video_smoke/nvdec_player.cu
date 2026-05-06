@@ -120,13 +120,21 @@ NvdecPlayer::NvdecPlayer()
     check_cu(cuDeviceGet(&device_, 0), "cuDeviceGet");
     check_cu(cuDevicePrimaryCtxRetain(&ctx_, device_), "cuDevicePrimaryCtxRetain");
 
-    CtxScope scope(ctx_);
     try
     {
+        // Activate the primary context via the runtime API so the
+        // stream we create is in the same context the renderer's
+        // QuadLayer::submit will use (it calls cudaSetDevice + the
+        // imported external semaphore was registered under that
+        // same primary context). Mixing manual cuCtxPushCurrent
+        // for stream creation with runtime API for signal causes
+        // cudaSignalExternalSemaphoresAsync to fail with
+        // "invalid argument".
+        check_cuda(cudaSetDevice(0), "cudaSetDevice");
+
         // Per-player non-blocking stream so multiple players don't
         // serialize their NPP / kernel / upload work on the default
-        // stream. cudaStreamNonBlocking decouples from stream 0
-        // (no implicit wait either direction).
+        // stream. cudaStreamNonBlocking decouples from stream 0.
         check_cuda(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking), "cudaStreamCreateWithFlags");
 
         // NPP stream context — populated once at construction so
@@ -143,8 +151,9 @@ NvdecPlayer::NvdecPlayer()
         cudaDeviceGetAttribute(&npp_ctx_.nCudaDevAttrComputeCapabilityMinor, cudaDevAttrComputeCapabilityMinor, 0);
         cudaStreamGetFlags(stream_, &npp_ctx_.nStreamFlags);
 
-        // Display-order output (default). bLowLatency / bForceZeroLatency
-        // off so B-frames are buffered and emitted in display order.
+        // NvDecoder pushes its own ctx internally for its driver
+        // API calls; bLowLatency / bForceZeroLatency off so B-frames
+        // are buffered and emitted in display order.
         decoder_ = std::make_unique<NvDecoder>(ctx_,
                                                /*bUseDeviceFrame=*/true, cudaVideoCodec_H264, /*bLowLatency=*/false);
     }
