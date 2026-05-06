@@ -146,6 +146,11 @@ NvdecPlayer::~NvdecPlayer()
         cudaFree(p);
     }
     free_buffers_.clear();
+    if (rgb_scratch_ != nullptr)
+    {
+        cudaFree(rgb_scratch_);
+        rgb_scratch_ = nullptr;
+    }
     decoder_.reset();
     if (ctx_ != nullptr)
     {
@@ -216,13 +221,26 @@ void NvdecPlayer::feed(const uint8_t* data, size_t size)
                 cudaFree(p);
             }
             free_buffers_.clear();
+            if (rgb_scratch_ != nullptr)
+            {
+                cudaFree(rgb_scratch_);
+                rgb_scratch_ = nullptr;
+            }
             pool_w_ = static_cast<uint32_t>(w);
             pool_h_ = static_cast<uint32_t>(h);
         }
 
+        // Lazily allocate the RGB scratch buffer the first time we
+        // see this resolution. Reused for every drained frame —
+        // feed() is serialized per player, so one buffer suffices
+        // and we avoid cudaMalloc/cudaFree per frame.
+        if (rgb_scratch_ == nullptr)
+        {
+            check_cuda(cudaMalloc(reinterpret_cast<void**>(&rgb_scratch_), npixels * 3), "cudaMalloc(rgb_scratch)");
+        }
+
         // Take a recycled RGBA buffer if available; cudaMalloc only
-        // when the pool is empty. Same goes for the short-lived RGB
-        // intermediate (rgb_pool_ kept inline below for brevity).
+        // when the pool is empty.
         uint8_t* rgba = nullptr;
         if (!free_buffers_.empty())
         {
@@ -234,27 +252,15 @@ void NvdecPlayer::feed(const uint8_t* data, size_t size)
             check_cuda(cudaMalloc(reinterpret_cast<void**>(&rgba), npixels * 4), "cudaMalloc(rgba)");
         }
 
-        // RGB intermediate isn't pooled — it's only live for ~one
-        // kernel launch, so the alloc cost matters less. If profiling
-        // shows it, mirror the RGBA pool.
-        uint8_t* rgb = nullptr;
-        const cudaError_t alloc_rgb = cudaMalloc(reinterpret_cast<void**>(&rgb), npixels * 3);
-        if (alloc_rgb != cudaSuccess)
-        {
-            cudaFree(rgba);
-            decoder_->UnlockFrame(&nv12);
-            throw std::runtime_error(std::string("NvdecPlayer: cudaMalloc(rgb) failed: ") + cudaGetErrorString(alloc_rgb));
-        }
-
         const Npp8u* nv12_planes[2] = { nv12, nv12 + luma_size };
         const NppiSize roi = { w, h };
-        check_npp(nppiNV12ToRGB_709CSC_8u_P2C3R(nv12_planes, pitch, rgb, w * 3, roi), "nppiNV12ToRGB_709CSC_8u_P2C3R");
+        check_npp(nppiNV12ToRGB_709CSC_8u_P2C3R(nv12_planes, pitch, rgb_scratch_, w * 3, roi),
+                  "nppiNV12ToRGB_709CSC_8u_P2C3R");
 
         const int block = 256;
         const int grid = (static_cast<int>(npixels) + block - 1) / block;
-        rgb_to_rgba_kernel<<<grid, block>>>(rgb, rgba, static_cast<int>(npixels));
+        rgb_to_rgba_kernel<<<grid, block>>>(rgb_scratch_, rgba, static_cast<int>(npixels));
         const cudaError_t kerr = cudaGetLastError();
-        cudaFree(rgb);
         decoder_->UnlockFrame(&nv12);
         if (kerr != cudaSuccess)
         {

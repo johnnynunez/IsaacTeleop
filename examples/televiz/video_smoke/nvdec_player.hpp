@@ -90,6 +90,11 @@ private:
     std::vector<uint8_t*> free_buffers_;
     uint32_t pool_w_ = 0;
     uint32_t pool_h_ = 0;
+
+    // RGB intermediate (NPP output before alpha pack). Allocated
+    // once per stream, reused by every feed() call. feed() is
+    // serialized per player, so a single buffer is sufficient.
+    uint8_t* rgb_scratch_ = nullptr;
 };
 
 } // namespace viz_smoke
