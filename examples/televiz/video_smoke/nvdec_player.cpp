@@ -8,6 +8,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace viz_smoke
 {
@@ -35,6 +36,33 @@ void cuda_check(cudaError_t r, const char* what)
 
 } // namespace
 
+OwnedRgba::~OwnedRgba()
+{
+    if (data != nullptr)
+    {
+        cudaFree(data);
+        data = nullptr;
+    }
+}
+
+OwnedRgba& OwnedRgba::operator=(OwnedRgba&& o) noexcept
+{
+    if (this != &o)
+    {
+        if (data != nullptr)
+        {
+            cudaFree(data);
+        }
+        data = o.data;
+        width = o.width;
+        height = o.height;
+        o.data = nullptr;
+        o.width = 0;
+        o.height = 0;
+    }
+    return *this;
+}
+
 NvdecPlayer::NvdecPlayer()
 {
     cu_check(cuInit(0), "cuInit");
@@ -44,8 +72,14 @@ NvdecPlayer::NvdecPlayer()
     cu_check(cuCtxPushCurrent(cu_context_), "cuCtxPushCurrent");
     try
     {
+        // bLowLatency=false / bForceZeroLatency=false: we want display
+        // order, not decode order. With B-frames the two differ; the
+        // zero-latency path returns frames as-decoded (I, P, B, B, ...)
+        // which would render as visible jitter. The cost is the
+        // decoder buffering up to a B-frame group internally before
+        // releasing — fine for file playback.
         decoder_ = std::make_unique<NvDecoder>(cu_context_,
-                                               /*bUseDeviceFrame=*/true, cudaVideoCodec_H264, /*bLowLatency=*/true,
+                                               /*bUseDeviceFrame=*/true, cudaVideoCodec_H264, /*bLowLatency=*/false,
                                                /*bDeviceFramePitched=*/false,
                                                /*pCropRect=*/nullptr,
                                                /*pResizeDim=*/nullptr,
@@ -53,7 +87,7 @@ NvdecPlayer::NvdecPlayer()
                                                /*nMaxWidth=*/0,
                                                /*nMaxHeight=*/0,
                                                /*nClockRate=*/1000,
-                                               /*bForceZeroLatency=*/true);
+                                               /*bForceZeroLatency=*/false);
     }
     catch (...)
     {
@@ -70,12 +104,10 @@ NvdecPlayer::NvdecPlayer()
 
 NvdecPlayer::~NvdecPlayer()
 {
+    // Release queued frames before the CUDA context goes away — their
+    // cudaFree in ~OwnedRgba needs a valid context.
+    ready_.clear();
     decoder_.reset();
-    if (rgba_buffer_ != nullptr)
-    {
-        cudaFree(rgba_buffer_);
-        rgba_buffer_ = nullptr;
-    }
     if (cu_context_ != nullptr)
     {
         cuDevicePrimaryCtxRelease(cu_device_);
@@ -83,29 +115,11 @@ NvdecPlayer::~NvdecPlayer()
     }
 }
 
-void NvdecPlayer::ensure_rgba_buffer(uint32_t width, uint32_t height)
-{
-    if (rgba_buffer_ != nullptr && rgba_width_ == width && rgba_height_ == height)
-    {
-        return;
-    }
-    if (rgba_buffer_ != nullptr)
-    {
-        cudaFree(rgba_buffer_);
-        rgba_buffer_ = nullptr;
-    }
-    const size_t bytes = static_cast<size_t>(width) * height * 4;
-    cuda_check(cudaMalloc(reinterpret_cast<void**>(&rgba_buffer_), bytes), "cudaMalloc(rgba)");
-    rgba_width_ = width;
-    rgba_height_ = height;
-}
-
 bool NvdecPlayer::feed(const uint8_t* data, size_t size)
 {
-    current_ = DecodedFrame{};
     if (data == nullptr || size == 0)
     {
-        return false;
+        return !ready_.empty();
     }
 
     cu_check(cuCtxPushCurrent(cu_context_), "cuCtxPushCurrent(decode)");
@@ -119,41 +133,60 @@ bool NvdecPlayer::feed(const uint8_t* data, size_t size)
         cuCtxPopCurrent(nullptr);
         throw std::runtime_error(std::string("NvdecPlayer: NvDecoder::Decode failed: ") + e.what());
     }
-    if (n_frames <= 0)
+
+    // Drain every frame the decoder released; if we leave any locked,
+    // the next Decode() may overwrite them and we visibly drop frames.
+    for (int i = 0; i < n_frames; ++i)
     {
-        cu_check(cuCtxPopCurrent(nullptr), "cuCtxPopCurrent(no-frame)");
-        return false;
+        uint8_t* nv12 = decoder_->GetLockedFrame();
+        if (nv12 == nullptr)
+        {
+            break;
+        }
+
+        const int w = decoder_->GetWidth();
+        const int h = decoder_->GetHeight();
+        const int pitch = decoder_->GetDeviceFramePitch();
+        const int luma_size = decoder_->GetLumaPlaneSize();
+
+        uint8_t* rgba = nullptr;
+        const size_t bytes = static_cast<size_t>(w) * h * 4;
+        const cudaError_t alloc_err = cudaMalloc(reinterpret_cast<void**>(&rgba), bytes);
+        if (alloc_err != cudaSuccess)
+        {
+            decoder_->UnlockFrame(&nv12);
+            cuCtxPopCurrent(nullptr);
+            throw std::runtime_error(std::string("NvdecPlayer: cudaMalloc(rgba) failed: ") +
+                                     cudaGetErrorString(alloc_err));
+        }
+
+        nv12_to_rgba_fullrange_bt601(nv12, nv12 + luma_size, pitch, rgba, w * 4, w, h, /*stream=*/0);
+        const cudaError_t kernel_err = cudaGetLastError();
+        decoder_->UnlockFrame(&nv12);
+        if (kernel_err != cudaSuccess)
+        {
+            cudaFree(rgba);
+            cuCtxPopCurrent(nullptr);
+            throw std::runtime_error(std::string("NvdecPlayer: NV12->RGBA kernel failed: ") +
+                                     cudaGetErrorString(kernel_err));
+        }
+
+        ready_.push_back(std::make_unique<OwnedRgba>(rgba, static_cast<uint32_t>(w), static_cast<uint32_t>(h)));
     }
 
-    uint8_t* nv12 = decoder_->GetLockedFrame();
-    if (nv12 == nullptr)
+    cu_check(cuCtxPopCurrent(nullptr), "cuCtxPopCurrent(post-drain)");
+    return !ready_.empty();
+}
+
+std::unique_ptr<OwnedRgba> NvdecPlayer::try_pop()
+{
+    if (ready_.empty())
     {
-        cu_check(cuCtxPopCurrent(nullptr), "cuCtxPopCurrent(no-locked)");
-        return false;
+        return nullptr;
     }
-
-    const int w = decoder_->GetWidth();
-    const int h = decoder_->GetHeight();
-    const int pitch = decoder_->GetDeviceFramePitch();
-    const int luma_size = decoder_->GetLumaPlaneSize();
-
-    ensure_rgba_buffer(static_cast<uint32_t>(w), static_cast<uint32_t>(h));
-
-    nv12_to_rgba_fullrange_bt601(
-        nv12, nv12 + luma_size, pitch, rgba_buffer_, static_cast<int>(rgba_width_) * 4, w, h, /*stream=*/0);
-    const cudaError_t kernel_err = cudaGetLastError();
-    decoder_->UnlockFrame(&nv12);
-    cu_check(cuCtxPopCurrent(nullptr), "cuCtxPopCurrent(post-convert)");
-    if (kernel_err != cudaSuccess)
-    {
-        throw std::runtime_error(std::string("NvdecPlayer: NV12->RGBA kernel failed: ") + cudaGetErrorString(kernel_err));
-    }
-
-    current_.data = rgba_buffer_;
-    current_.width = rgba_width_;
-    current_.height = rgba_height_;
-    current_.pitch = static_cast<size_t>(rgba_width_) * 4;
-    return true;
+    auto front = std::move(ready_.front());
+    ready_.pop_front();
+    return front;
 }
 
 } // namespace viz_smoke
