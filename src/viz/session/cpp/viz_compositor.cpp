@@ -61,7 +61,7 @@ void VizCompositor::init()
 
 void VizCompositor::destroy()
 {
-    command_buffers_ = nullptr;
+    command_buffers_.reset();
     command_pool_ = nullptr;
     frame_sync_.reset();
 }
@@ -73,11 +73,11 @@ void VizCompositor::create_command_pool_and_buffer()
                                                         .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
                                                         .queueFamilyIndex = ctx_->queue_family_index(),
                                                     } };
-    command_buffers_ = vk::raii::CommandBuffers{ ctx_->raii_device(), vk::CommandBufferAllocateInfo{
-                                                                          .commandPool = *command_pool_,
-                                                                          .level = vk::CommandBufferLevel::ePrimary,
-                                                                          .commandBufferCount = 1,
-                                                                      } };
+    command_buffers_.emplace(ctx_->raii_device(), vk::CommandBufferAllocateInfo{
+                                                      .commandPool = *command_pool_,
+                                                      .level = vk::CommandBufferLevel::ePrimary,
+                                                      .commandBufferCount = 1,
+                                                  });
 }
 
 void VizCompositor::submit_or_signal_fence(const vk::SubmitInfo& info, const char* what)
@@ -101,7 +101,7 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
     // Wait for previous frame (1 frame in flight).
     frame_sync_->wait();
 
-    auto& cmd = command_buffers_[0];
+    auto& cmd = (*command_buffers_)[0];
 
     // RAII: leave the command buffer in INITIAL state on every exit
     // path (success or throw). VizSession::pump_events() runs between

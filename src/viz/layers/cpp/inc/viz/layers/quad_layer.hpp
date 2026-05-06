@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace viz
@@ -143,7 +144,12 @@ private:
     vk::raii::DescriptorPool descriptor_pool_{ nullptr };
     // One descriptor set per slot, each binding the corresponding
     // DeviceImage's sRGB view. record() picks the one for in_use_.
-    vk::raii::DescriptorSets descriptor_sets_{ nullptr };
+    //
+    // Wrapped in std::optional because vk::raii::DescriptorSets is a
+    // vector-style raii type — older vulkan-hpp SDKs (e.g., Ubuntu
+    // 22.04 ARM64 CI) lack the nullptr ctor / nullptr-assign that
+    // newer SDKs added. optional gives us portable lazy init.
+    std::optional<vk::raii::DescriptorSets> descriptor_sets_;
 
     // Mailbox state. Both atomic so producer and renderer can
     // touch them without locks.

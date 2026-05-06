@@ -9,6 +9,7 @@
 #include <viz/core/vk.hpp>
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace viz
@@ -67,7 +68,9 @@ private:
 
     std::unique_ptr<FrameSync> frame_sync_;
     vk::raii::CommandPool command_pool_{ nullptr };
-    vk::raii::CommandBuffers command_buffers_{ nullptr };
+    // Wrapped in std::optional — older vulkan-hpp SDKs lack the
+    // nullptr ctor on the vector-style raii types.
+    std::optional<vk::raii::CommandBuffers> command_buffers_;
 };
 
 } // namespace viz

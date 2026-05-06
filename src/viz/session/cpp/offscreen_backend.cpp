@@ -60,7 +60,7 @@ void OffscreenBackend::init(const VkContext& ctx, Resolution preferred_size)
 
 void OffscreenBackend::destroy()
 {
-    readback_command_buffers_ = nullptr;
+    readback_command_buffers_.reset();
     readback_command_pool_ = nullptr;
     readback_buffer_ = nullptr;
     readback_memory_ = nullptr;
@@ -105,7 +105,7 @@ HostImage OffscreenBackend::readback_to_host()
         throw std::runtime_error("OffscreenBackend::readback_to_host: backend not initialized");
     }
 
-    auto& cmd = readback_command_buffers_[0];
+    auto& cmd = (*readback_command_buffers_)[0];
 
     // RT is in TRANSFER_SRC_OPTIMAL from the render pass's final layout.
     cmd.reset();
@@ -161,11 +161,11 @@ void OffscreenBackend::create_readback_staging()
                                            .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
                                            .queueFamilyIndex = ctx_->queue_family_index(),
                                        } };
-    readback_command_buffers_ = vk::raii::CommandBuffers{ device, vk::CommandBufferAllocateInfo{
-                                                                      .commandPool = *readback_command_pool_,
-                                                                      .level = vk::CommandBufferLevel::ePrimary,
-                                                                      .commandBufferCount = 1,
-                                                                  } };
+    readback_command_buffers_.emplace(device, vk::CommandBufferAllocateInfo{
+                                                  .commandPool = *readback_command_pool_,
+                                                  .level = vk::CommandBufferLevel::ePrimary,
+                                                  .commandBufferCount = 1,
+                                              });
 }
 
 } // namespace viz

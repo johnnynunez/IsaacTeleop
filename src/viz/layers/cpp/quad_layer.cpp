@@ -108,7 +108,7 @@ void QuadLayer::destroy()
     // before its layout, sampler last. raii handles the actual
     // destruction order via reset-to-nullptr in declared order
     // (parent-first declaration → reverse runs child-first).
-    descriptor_sets_ = nullptr;
+    descriptor_sets_.reset();
     descriptor_pool_ = nullptr;
     pipeline_ = nullptr;
     pipeline_layout_ = nullptr;
@@ -232,7 +232,7 @@ void QuadLayer::record(VkCommandBuffer cmd, const std::vector<ViewInfo>& views, 
 
     const vk::CommandBuffer cmd_hpp{ cmd };
     cmd_hpp.bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline_);
-    cmd_hpp.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, *pipeline_layout_, 0, *descriptor_sets_[cur], {});
+    cmd_hpp.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, *pipeline_layout_, 0, *(*descriptor_sets_)[cur], {});
 
     // 1 view in window/offscreen, 2 in XR stereo. Compositor pre-bound
     // the layer's scissor; we bind viewport per view and draw.
@@ -413,14 +413,11 @@ void QuadLayer::allocate_descriptor_sets()
     std::array<vk::DescriptorSetLayout, kSlotCount> layouts{};
     layouts.fill(*descriptor_set_layout_);
 
-    descriptor_sets_ = vk::raii::DescriptorSets{
-        ctx_->raii_device(),
-        vk::DescriptorSetAllocateInfo{
-            .descriptorPool = *descriptor_pool_,
-            .descriptorSetCount = kSlotCount,
-            .pSetLayouts = layouts.data(),
-        },
-    };
+    descriptor_sets_.emplace(ctx_->raii_device(), vk::DescriptorSetAllocateInfo{
+                                                      .descriptorPool = *descriptor_pool_,
+                                                      .descriptorSetCount = kSlotCount,
+                                                      .pSetLayouts = layouts.data(),
+                                                  });
 }
 
 void QuadLayer::update_descriptor_sets()
@@ -436,7 +433,7 @@ void QuadLayer::update_descriptor_sets()
             .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
         };
         writes[i] = vk::WriteDescriptorSet{
-            .dstSet = *descriptor_sets_[i],
+            .dstSet = *(*descriptor_sets_)[i],
             .dstBinding = 0,
             .dstArrayElement = 0,
             .descriptorCount = 1,

@@ -7,6 +7,7 @@
 #include <viz/session/display_backend.hpp>
 
 #include <memory>
+#include <optional>
 
 namespace viz
 {
@@ -46,7 +47,9 @@ private:
 
     // Dedicated cmd buffer so readback never races the compositor's.
     vk::raii::CommandPool readback_command_pool_{ nullptr };
-    vk::raii::CommandBuffers readback_command_buffers_{ nullptr };
+    // Wrapped in std::optional — older vulkan-hpp SDKs lack the
+    // nullptr ctor on the vector-style raii types.
+    std::optional<vk::raii::CommandBuffers> readback_command_buffers_;
 };
 
 } // namespace viz
