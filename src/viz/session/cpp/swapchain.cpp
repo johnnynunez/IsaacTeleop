@@ -240,11 +240,12 @@ std::optional<Swapchain::AcquiredImage> Swapchain::acquire_next_image()
         return std::nullopt;
     }
     const auto& sem = image_available_[frame_slot_];
-    const auto result = swapchain_.acquireNextImage(UINT64_MAX, *sem, VK_NULL_HANDLE);
-    const vk::Result r = result.first;
-    const uint32_t image_index = result.second;
-    // OUT_OF_DATE: caller must recreate. SUBOPTIMAL: image is valid,
-    // pass it through and let the WSI scale on present.
+    // raii::SwapchainKHR::acquireNextImage throws on OUT_OF_DATE /
+    // SUBOPTIMAL — same flow-control codes we treat as normal here.
+    // Drop to the C entry point so the result is observable.
+    uint32_t image_index = 0;
+    const vk::Result r = static_cast<vk::Result>(
+        vkAcquireNextImageKHR(*ctx_->raii_device(), *swapchain_, UINT64_MAX, *sem, VK_NULL_HANDLE, &image_index));
     if (r == vk::Result::eErrorOutOfDateKHR)
     {
         return std::nullopt;
