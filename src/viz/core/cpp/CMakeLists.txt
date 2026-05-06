@@ -34,6 +34,7 @@ add_library(viz_core STATIC
     inc/viz/core/render_target.hpp
     inc/viz/core/viz_buffer.hpp
     inc/viz/core/viz_types.hpp
+    inc/viz/core/vk.hpp
     inc/viz/core/vk_context.hpp
 )
 
