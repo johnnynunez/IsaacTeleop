@@ -81,14 +81,19 @@ void feed_one_chunk(Video& v, std::vector<uint8_t>& chunk)
 int main(int argc, char** argv)
 {
     float lod_bias = 0.0f;
+    bool static_mode = false;
     std::vector<const char*> paths;
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
-        const std::string prefix = "--lod-bias=";
-        if (a.rfind(prefix, 0) == 0)
+        const std::string lod_prefix = "--lod-bias=";
+        if (a.rfind(lod_prefix, 0) == 0)
         {
-            lod_bias = std::stof(a.substr(prefix.size()));
+            lod_bias = std::stof(a.substr(lod_prefix.size()));
+        }
+        else if (a == "--static")
+        {
+            static_mode = true;
         }
         else
         {
@@ -98,10 +103,14 @@ int main(int argc, char** argv)
     if (paths.empty())
     {
         std::fprintf(stderr,
-                     "usage: %s [--lod-bias=N] <video.h264> [<video.h264> ...]\n"
+                     "usage: %s [--lod-bias=N] [--static] <video.h264> [<video.h264> ...]\n"
                      "  --lod-bias=N : sampler mipLodBias (default 0). Positive values\n"
                      "                 bias toward blurrier mip levels — try 0.5..1.5\n"
                      "                 to reduce shimmer on fine detail.\n"
+                     "  --static     : decode only the first frame of each input, then\n"
+                     "                 reuse it for the rest of the run. Isolates\n"
+                     "                 Televiz render cost from NVDEC + color-convert\n"
+                     "                 cost when stress-testing tile counts.\n"
                      "  Inputs must be raw H.264 Annex B. To convert from MP4:\n"
                      "    ffmpeg -i in.mp4 -c:v copy -bsf:v h264_mp4toannexb -f h264 out.h264\n",
                      argv[0]);
@@ -123,7 +132,7 @@ int main(int argc, char** argv)
             }
             videos.push_back(std::move(v));
         }
-        std::printf("lod_bias = %.2f\n", lod_bias);
+        std::printf("lod_bias = %.2f, static = %d\n", lod_bias, static_mode ? 1 : 0);
 
         // Prime each player to its first frame so we know the resolutions
         // before sizing the window + layers.
@@ -195,26 +204,30 @@ int main(int argc, char** argv)
             // only consume + submit a new frame when the per-video
             // presentation deadline has elapsed. The QuadLayer mailbox
             // keeps the previously submitted frame visible across the
-            // intervening render iterations.
-            for (auto& v : videos)
+            // intervening render iterations. --static skips both —
+            // the first-frame submit done above is the only submit.
+            if (!static_mode)
             {
-                for (int safety = 0; safety < 256 && v->player.queued_frame_count() == 0; ++safety)
+                for (auto& v : videos)
                 {
-                    feed_one_chunk(*v, chunk);
-                }
-                if (now >= v->next_present)
-                {
-                    if (auto next = v->player.try_pop())
+                    for (int safety = 0; safety < 256 && v->player.queued_frame_count() == 0; ++safety)
                     {
-                        submit_to_layer(*v->layer, *next);
-                        v->in_flight = std::move(next);
+                        feed_one_chunk(*v, chunk);
                     }
-                    v->next_present += v->frame_period;
-                    // Don't accumulate debt if we fell behind (e.g.
-                    // window was hidden / frozen). Snap to wall clock.
-                    if (v->next_present < now)
+                    if (now >= v->next_present)
                     {
-                        v->next_present = now + v->frame_period;
+                        if (auto next = v->player.try_pop())
+                        {
+                            submit_to_layer(*v->layer, *next);
+                            v->in_flight = std::move(next);
+                        }
+                        v->next_present += v->frame_period;
+                        // Don't accumulate debt if we fell behind (e.g.
+                        // window was hidden / frozen). Snap to wall clock.
+                        if (v->next_present < now)
+                        {
+                            v->next_present = now + v->frame_period;
+                        }
                     }
                 }
             }
