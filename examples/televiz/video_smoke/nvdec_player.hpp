@@ -8,21 +8,27 @@
 #include <cuda.h>
 #include <deque>
 #include <memory>
+#include <vector>
 
 class NvDecoder;
 
 namespace viz_smoke
 {
 
-// One decoded RGBA8 frame on GPU memory, owns its own allocation.
+class NvdecPlayer;
+
+// One decoded RGBA8 frame on GPU memory. The buffer is owned by the
+// originating NvdecPlayer's pool; ~DecodedFrame returns it for reuse
+// (or cudaFrees it if the pool is full or the size mismatches).
 struct DecodedFrame
 {
+    NvdecPlayer* player = nullptr; // non-owning back-pointer for recycle
     uint8_t* data = nullptr;
     uint32_t width = 0;
     uint32_t height = 0;
 
     DecodedFrame() = default;
-    DecodedFrame(uint8_t* d, uint32_t w, uint32_t h) noexcept;
+    DecodedFrame(NvdecPlayer* p, uint8_t* d, uint32_t w, uint32_t h) noexcept;
     ~DecodedFrame();
     DecodedFrame(const DecodedFrame&) = delete;
     DecodedFrame& operator=(const DecodedFrame&) = delete;
@@ -61,12 +67,29 @@ public:
     // fall back to a default cadence in that case.
     double frame_period_seconds() const noexcept;
 
+    // Called by ~DecodedFrame to return its buffer to the pool.
+    // Public because the back-pointer in DecodedFrame needs it; not
+    // intended for direct caller use.
+    void release_buffer(uint8_t* p, uint32_t w, uint32_t h) noexcept;
+
 private:
+    // Cap to bound memory if a B-frame group is larger than typical.
+    // 8 buffers at 1080p RGBA8 = 64 MB per stream, ample for any
+    // realistic GOP.
+    static constexpr size_t kPoolMax = 8;
+
     CUdevice device_ = 0;
     CUcontext ctx_ = nullptr;
     std::unique_ptr<NvDecoder> decoder_;
 
     std::deque<std::unique_ptr<DecodedFrame>> queue_;
+
+    // Recycled buffers, all sized to (pool_w_ x pool_h_ x 4) bytes.
+    // Resolution change (rare in a single-stream playback) drops the
+    // pool and starts over.
+    std::vector<uint8_t*> free_buffers_;
+    uint32_t pool_w_ = 0;
+    uint32_t pool_h_ = 0;
 };
 
 } // namespace viz_smoke

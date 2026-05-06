@@ -161,6 +161,11 @@ void QuadLayer::destroy()
     }
     latest_.store(kSlotNone, std::memory_order_release);
     in_use_.store(kSlotNone, std::memory_order_release);
+    for (auto& g : slot_generation_)
+    {
+        g.store(0, std::memory_order_release);
+    }
+    slot_last_mipped_.fill(0);
 }
 
 Resolution QuadLayer::resolution() const noexcept
@@ -245,9 +250,12 @@ void QuadLayer::submit(const VizBuffer& src, cudaStream_t stream)
                "cudaMemcpy2DToArrayAsync");
     image.cuda_signal_write_done(stream);
 
-    // Publish. The renderer's next record() will atomic-exchange
-    // this into in_use_; the previous latest_ slot becomes free.
-    // memory_order_release pairs with the renderer's acquire load.
+    // Bump generation BEFORE publishing latest_ so the renderer's
+    // record_pre_render_pass — which loads latest_ first, then
+    // slot_generation_[cur] — sees a coherent (slot, generation)
+    // pair. The release store on latest_ below pairs with the
+    // renderer's acquire load.
+    slot_generation_[slot].fetch_add(1, std::memory_order_release);
     latest_.store(slot, std::memory_order_release);
 }
 
@@ -271,10 +279,18 @@ void QuadLayer::record_pre_render_pass(VkCommandBuffer cmd, const std::vector<Vi
     {
         return;
     }
-    // Refresh the mip chain from level 0 (CUDA's write target).
-    // The compositor's wait on cuda_done_writing at TRANSFER stage
-    // holds these blits back until CUDA's level-0 write retires.
-    slots_[cur]->record_mipmap_generation(cmd);
+    // Refresh the mip chain only when the slot's level 0 has changed
+    // since the last regen. submit() bumps slot_generation_[slot];
+    // we record the value we last mipped and skip the blit chain
+    // when it's stale-equal. The compositor's wait on
+    // cuda_done_writing at TRANSFER stage holds these blits back
+    // until CUDA's level-0 write retires.
+    const uint64_t gen = slot_generation_[cur].load(std::memory_order_acquire);
+    if (gen != slot_last_mipped_[cur])
+    {
+        slots_[cur]->record_mipmap_generation(cmd);
+        slot_last_mipped_[cur] = gen;
+    }
 }
 
 void QuadLayer::record(VkCommandBuffer cmd, const std::vector<ViewInfo>& views, const RenderTarget& /*target*/)

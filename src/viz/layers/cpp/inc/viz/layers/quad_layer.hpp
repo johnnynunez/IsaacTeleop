@@ -164,6 +164,15 @@ private:
     //               published slot. record() updates this.
     std::atomic<uint8_t> latest_{ kSlotNone };
     std::atomic<uint8_t> in_use_{ kSlotNone };
+
+    // Per-slot generation counter, incremented on every submit() to
+    // that slot. Renderer's record_pre_render_pass compares against
+    // slot_last_mipped_ and skips mipmap generation when level 0
+    // hasn't changed since the last regen — eliminates wasted blits
+    // when the source FPS is below render FPS (typical: 25 fps
+    // content rendered at 60 Hz spends 2/3 of frames on stale data).
+    std::array<std::atomic<uint64_t>, kSlotCount> slot_generation_{};
+    std::array<uint64_t, kSlotCount> slot_last_mipped_{};
 };
 
 } // namespace viz

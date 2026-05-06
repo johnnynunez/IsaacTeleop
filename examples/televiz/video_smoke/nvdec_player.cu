@@ -77,20 +77,22 @@ __global__ void rgb_to_rgba_kernel(const uint8_t* __restrict__ rgb, uint8_t* __r
 
 } // namespace
 
-DecodedFrame::DecodedFrame(uint8_t* d, uint32_t w, uint32_t h) noexcept : data(d), width(w), height(h)
+DecodedFrame::DecodedFrame(NvdecPlayer* p, uint8_t* d, uint32_t w, uint32_t h) noexcept
+    : player(p), data(d), width(w), height(h)
 {
 }
 
 DecodedFrame::~DecodedFrame()
 {
-    if (data != nullptr)
+    if (data != nullptr && player != nullptr)
     {
-        cudaFree(data);
+        player->release_buffer(data, width, height);
     }
 }
 
-DecodedFrame::DecodedFrame(DecodedFrame&& o) noexcept : data(o.data), width(o.width), height(o.height)
+DecodedFrame::DecodedFrame(DecodedFrame&& o) noexcept : player(o.player), data(o.data), width(o.width), height(o.height)
 {
+    o.player = nullptr;
     o.data = nullptr;
 }
 
@@ -98,13 +100,15 @@ DecodedFrame& DecodedFrame::operator=(DecodedFrame&& o) noexcept
 {
     if (this != &o)
     {
-        if (data != nullptr)
+        if (data != nullptr && player != nullptr)
         {
-            cudaFree(data);
+            player->release_buffer(data, width, height);
         }
+        player = o.player;
         data = o.data;
         width = o.width;
         height = o.height;
+        o.player = nullptr;
         o.data = nullptr;
     }
     return *this;
@@ -134,12 +138,38 @@ NvdecPlayer::NvdecPlayer()
 
 NvdecPlayer::~NvdecPlayer()
 {
-    queue_.clear(); // cudaFree under valid context
+    // Release queued frames first — their dtor pushes back to
+    // free_buffers_ via release_buffer, so the pool grows here.
+    queue_.clear();
+    for (uint8_t* p : free_buffers_)
+    {
+        cudaFree(p);
+    }
+    free_buffers_.clear();
     decoder_.reset();
     if (ctx_ != nullptr)
     {
         cuDevicePrimaryCtxRelease(device_);
         ctx_ = nullptr;
+    }
+}
+
+void NvdecPlayer::release_buffer(uint8_t* p, uint32_t w, uint32_t h) noexcept
+{
+    if (p == nullptr)
+    {
+        return;
+    }
+    // Recycle if the buffer matches the current pool dimensions and
+    // we have room. Otherwise fall through to cudaFree to keep the
+    // pool bounded (e.g. after a resolution change).
+    if (w == pool_w_ && h == pool_h_ && free_buffers_.size() < kPoolMax)
+    {
+        free_buffers_.push_back(p);
+    }
+    else
+    {
+        cudaFree(p);
     }
 }
 
@@ -178,18 +208,42 @@ void NvdecPlayer::feed(const uint8_t* data, size_t size)
         const int luma_size = decoder_->GetLumaPlaneSize();
         const size_t npixels = static_cast<size_t>(w) * h;
 
-        // Allocate intermediate RGB + final RGBA. The intermediate is
-        // freed at end of scope (cudaFreeAsync would need a stream).
-        uint8_t* rgb = nullptr;
-        uint8_t* rgba = nullptr;
-        check_cuda(cudaMalloc(reinterpret_cast<void**>(&rgb), npixels * 3), "cudaMalloc(rgb)");
-        const cudaError_t alloc_rgba = cudaMalloc(reinterpret_cast<void**>(&rgba), npixels * 4);
-        if (alloc_rgba != cudaSuccess)
+        // Pool is keyed on (w, h). Drop on first resolution change.
+        if (pool_w_ != static_cast<uint32_t>(w) || pool_h_ != static_cast<uint32_t>(h))
         {
-            cudaFree(rgb);
+            for (uint8_t* p : free_buffers_)
+            {
+                cudaFree(p);
+            }
+            free_buffers_.clear();
+            pool_w_ = static_cast<uint32_t>(w);
+            pool_h_ = static_cast<uint32_t>(h);
+        }
+
+        // Take a recycled RGBA buffer if available; cudaMalloc only
+        // when the pool is empty. Same goes for the short-lived RGB
+        // intermediate (rgb_pool_ kept inline below for brevity).
+        uint8_t* rgba = nullptr;
+        if (!free_buffers_.empty())
+        {
+            rgba = free_buffers_.back();
+            free_buffers_.pop_back();
+        }
+        else
+        {
+            check_cuda(cudaMalloc(reinterpret_cast<void**>(&rgba), npixels * 4), "cudaMalloc(rgba)");
+        }
+
+        // RGB intermediate isn't pooled — it's only live for ~one
+        // kernel launch, so the alloc cost matters less. If profiling
+        // shows it, mirror the RGBA pool.
+        uint8_t* rgb = nullptr;
+        const cudaError_t alloc_rgb = cudaMalloc(reinterpret_cast<void**>(&rgb), npixels * 3);
+        if (alloc_rgb != cudaSuccess)
+        {
+            cudaFree(rgba);
             decoder_->UnlockFrame(&nv12);
-            throw std::runtime_error(std::string("NvdecPlayer: cudaMalloc(rgba) failed: ") +
-                                     cudaGetErrorString(alloc_rgba));
+            throw std::runtime_error(std::string("NvdecPlayer: cudaMalloc(rgb) failed: ") + cudaGetErrorString(alloc_rgb));
         }
 
         const Npp8u* nv12_planes[2] = { nv12, nv12 + luma_size };
@@ -208,7 +262,7 @@ void NvdecPlayer::feed(const uint8_t* data, size_t size)
             throw std::runtime_error(std::string("NvdecPlayer: rgb_to_rgba kernel failed: ") + cudaGetErrorString(kerr));
         }
 
-        queue_.push_back(std::make_unique<DecodedFrame>(rgba, static_cast<uint32_t>(w), static_cast<uint32_t>(h)));
+        queue_.push_back(std::make_unique<DecodedFrame>(this, rgba, static_cast<uint32_t>(w), static_cast<uint32_t>(h)));
     }
 }
 
