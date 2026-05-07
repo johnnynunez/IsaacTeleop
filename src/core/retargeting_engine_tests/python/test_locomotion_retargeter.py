@@ -116,7 +116,8 @@ class TestLocomotionDtIntegration:
             )
             r._compute_fn(inputs, outputs, ctx)
 
-        assert float(outputs["root_command"][0][3]) == 0.72
+        # Output is float32, so allow one ulp of round-trip slack from 0.72.
+        assert math.isclose(float(outputs["root_command"][0][3]), 0.72, abs_tol=1e-6)
 
     def test_reset_clears_previous_timestamp(self):
         """After a reset, the next step uses the fallback dt rather than a
@@ -150,9 +151,9 @@ class TestLocomotionDtIntegration:
 
         # After reset, the integration starts from initial_hip_height and uses
         # the fallback dt for this frame — NOT the 10s gap from the prior step.
-        config = LocomotionRootCmdRetargeterConfig()
+        # Output rounds to float32, so use a tolerance compatible with that.
         expected = 0.72 + 1.0 * config.fallback_dt * 0.35
-        assert math.isclose(h_after_reset, expected, abs_tol=1e-9), h_after_reset
+        assert math.isclose(h_after_reset, expected, abs_tol=1e-5), h_after_reset
         # And verify it is nowhere near what 10s of integration would produce
         # (which would saturate at the 1.0 hip ceiling).
         assert h_after_reset < 0.73
