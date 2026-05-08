@@ -585,19 +585,39 @@ jobs:
       wheel_paths: ${{ steps.upload-artifactory.outputs.wheel_paths }}
     environment: dev
 
-    # Publish only for same-repo runs (pushes or non-fork PRs) after upstream jobs succeed.
-    # github.repository is the base repo even for fork PRs, so a plain equality check does
-    # not filter forks; compare the PR head repo instead.
+    # Publish only for same-repo runs (pushes or non-fork PRs). Use always()
+    # so publish-wheel still runs on trusted refs when dependencies fail/skip;
+    # otherwise GitHub would skip this job, and branch rulesets treat skipped
+    # required checks as passing.
+    # github.repository is the base repo even for fork PRs, so a plain equality
+    # check does not filter forks; compare the PR head repo instead.
     if: >-
-      (github.event_name != 'pull_request'
+      always()
+      && (github.event_name != 'pull_request'
         || github.event.pull_request.head.repo.full_name == github.repository)
-      && needs.build-ubuntu.result == 'success'
-      && needs.test-viz-gpu.result == 'success'
-      && needs.test-viz-sanitizers.result == 'success'
-      && needs.test-cloudxr.result == 'success'
-      && needs.test-teleop-ros2.result == 'success'
 
     steps:
+    - name: Require upstream jobs success
+      env:
+        NEEDS_JSON: ${{ toJson(needs) }}
+      run: |
+        set -euo pipefail
+
+        failed_jobs="$(
+          jq -r '
+            to_entries[]
+            | select(.value.result != "success")
+            | "\(.key) completed with result: \(.value.result)"
+          ' <<< "${NEEDS_JSON}"
+        )"
+
+        if [[ -n "${failed_jobs}" ]]; then
+          echo "${failed_jobs}"
+          exit 1
+        fi
+
+        echo "All upstream jobs completed successfully"
+
     - name: Set up Python
       uses: actions/setup-python@v6
       with:
