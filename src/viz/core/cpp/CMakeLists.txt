@@ -31,6 +31,7 @@ add_library(viz_core STATIC
     inc/viz/core/device_image.hpp
     inc/viz/core/frame_sync.hpp
     inc/viz/core/host_image.hpp
+    inc/viz/core/openxr_platform_compat.hpp
     inc/viz/core/render_target.hpp
     inc/viz/core/viz_buffer.hpp
     inc/viz/core/viz_types.hpp
@@ -42,11 +43,16 @@ target_include_directories(viz_core
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/inc>
 )
 
+if(NOT TARGET openxr_loader)
+    message(FATAL_ERROR "viz_core: openxr_loader target missing (project FetchContent).")
+endif()
+
 target_link_libraries(viz_core
     PUBLIC
         Vulkan::Vulkan
         glm::glm
         CUDA::cudart_static
+        openxr_loader
 )
 
 # Aliased as viz::core (consumers say viz::core, not viz::viz_core).

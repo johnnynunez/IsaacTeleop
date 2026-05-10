@@ -19,18 +19,13 @@ namespace viz
 
 class VkContext;
 
-// Abstract presentation target. VizSession instantiates one per
-// DisplayMode; VizCompositor drives it.
+// Abstract presentation target — one per DisplayMode. Owns the
+// intermediate RenderTarget plus mode-specific resources (window
+// swapchain / readback staging / XR session). RT's render pass stays
+// compat-stable across resize so layer pipelines remain valid.
 //
-// Backends own the intermediate RenderTarget plus any mode-specific
-// resources (window+swapchain, readback staging, XR session). The
-// RT's render pass stays compatibility-stable across resize so layer
-// pipelines built against it remain valid.
-//
-// Per-frame: begin_frame -> compositor renders into render_target()
-// -> record_post_render_pass (backend's blit/transitions) -> compositor
-// submits with the backend's wait/signal semaphores -> end_frame
-// (present / no-op).
+// Per frame: begin_frame → compositor renders into render_target() →
+// record_post_render_pass (blit/transitions) → submit → end_frame.
 class DisplayBackend
 {
 public:
@@ -55,11 +50,22 @@ public:
     // Allocate device resources. Throws on failure.
     virtual void init(const VkContext& ctx, Resolution preferred_size) = 0;
 
+    // True for the kXr backend. Compositor uses this to gate XR-specific
+    // paths (skip tile_layout, don't override view[0].viewport).
+    virtual bool is_xr() const noexcept
+    {
+        return false;
+    }
+
     struct Frame
     {
         // Per-view info: 1 entry for window/offscreen, 2 for XR stereo.
         // Compositor overrides per-layer viewport rects via tile_layout.
         std::vector<ViewInfo> views;
+
+        // Head pose at predicted_display_time in the session's reference
+        // space. nullopt on tracking loss or non-XR modes.
+        std::optional<Pose3D> head_pose;
 
         // Binary semaphores threaded into the compositor's submit.
         // VK_NULL_HANDLE means none needed (kOffscreen).
@@ -68,7 +74,7 @@ public:
         VkSemaphore signal_after_render = VK_NULL_HANDLE;
 
         // Backend-private bookkeeping round-tripped to record_post_* /
-        // end_frame (e.g. swapchain image_index).
+        // end_frame (e.g. swapchain image_index, predicted_display_time).
         uint64_t backend_token = 0;
     };
 

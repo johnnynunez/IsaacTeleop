@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <viz/core/vk_context.hpp>
-#include <viz/layers/layer_base.hpp>
 #include <viz/session/display_backend.hpp>
+#include <viz/session/layer_base.hpp>
 #include <viz/session/tile_layout.hpp>
 #include <viz/session/viz_compositor.hpp>
 
@@ -60,6 +60,22 @@ void VizCompositor::init()
         frame_sync_ = FrameSync::create(*ctx_);
         create_command_pool();
         create_command_buffer();
+        if (config_.gpu_timing)
+        {
+            // period 0 = device doesn't support timestamps; leave last_gpu_timing_ zeroed.
+            VkPhysicalDeviceProperties props{};
+            vkGetPhysicalDeviceProperties(ctx_->physical_device(), &props);
+            timestamp_period_ns_ = props.limits.timestampPeriod;
+            if (timestamp_period_ns_ > 0.0f)
+            {
+                VkQueryPoolCreateInfo qpci{};
+                qpci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+                qpci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+                qpci.queryCount = 4;
+                check_vk(vkCreateQueryPool(ctx_->device(), &qpci, nullptr, &gpu_timestamp_pool_),
+                         "vkCreateQueryPool(timestamps)");
+            }
+        }
     }
     catch (...)
     {
@@ -85,6 +101,11 @@ void VizCompositor::destroy()
         vkDestroyCommandPool(device, command_pool_, nullptr);
         command_pool_ = VK_NULL_HANDLE;
         command_buffer_ = VK_NULL_HANDLE;
+    }
+    if (gpu_timestamp_pool_ != VK_NULL_HANDLE)
+    {
+        vkDestroyQueryPool(device, gpu_timestamp_pool_, nullptr);
+        gpu_timestamp_pool_ = VK_NULL_HANDLE;
     }
     frame_sync_.reset();
 }
@@ -126,12 +147,11 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
     // Wait for previous frame (1 frame in flight).
     frame_sync_->wait();
 
-    // RAII: leave the command buffer in INITIAL state on every exit
-    // path (success or throw). VizSession::pump_events() runs between
-    // render() calls and may destroy framebuffer attachments, which
-    // Vulkan forbids while any cmd buffer that references them is in
-    // RECORDING / EXECUTABLE / PENDING state. The trailing fence wait
-    // below guarantees we're never PENDING when this destructor runs.
+    // Leave the command buffer in INITIAL on every exit path —
+    // pump_events() between renders may destroy framebuffer attachments,
+    // which Vulkan forbids while a cmd buffer referencing them is
+    // RECORDING/EXECUTABLE/PENDING. The trailing fence wait below
+    // guarantees we're never PENDING here.
     struct CmdResetGuard
     {
         VkCommandBuffer cmd;
@@ -144,9 +164,8 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
         }
     } cmd_guard{ command_buffer_ };
 
-    // Snapshot visible layers ONCE — is_visible() is atomic; reading
-    // it twice could record a draw without the matching wait (or vice
-    // versa) and race the producer's CUDA copy.
+    // Snapshot visible layers once — is_visible() is atomic, and
+    // reading it twice could record a draw without the matching wait.
     std::vector<LayerBase*> visible_layers;
     visible_layers.reserve(layers.size());
     for (LayerBase* layer : layers)
@@ -160,17 +179,13 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
     auto frame = backend_->begin_frame(/*predicted_display_time=*/0);
     if (!frame.has_value())
     {
-        // Backend skipped this frame; fence stays signaled, next call won't deadlock.
+        // Backend skipped; fence stays signaled, next wait() won't deadlock.
         return;
     }
 
-    // RAII: if we unwind before the explicit end_frame below, call
-    // abort_frame instead. We must NOT call end_frame on the
-    // exception path — its present would wait on signal_after_render,
-    // which our submit may have never signaled (e.g., if recording
-    // threw before vkQueueSubmit). abort_frame is the backend's
-    // "drop this frame, recover next" hook (window backend marks
-    // the swapchain dirty for recreate; offscreen no-ops).
+    // On unwind, call abort_frame instead of end_frame: end_frame's
+    // present would wait on signal_after_render which our submit may
+    // never have signaled. abort_frame is the backend's recovery hook.
     struct FrameGuard
     {
         DisplayBackend* backend;
@@ -194,9 +209,15 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
     const RenderTarget& rt = backend_->render_target();
     const Resolution rt_extent = rt.resolution();
 
-    // Per-layer aspect-fit tiles; nullopt aspect = fill the tile.
+    // XR: per-eye viewports already set in frame->views by XrBackend.
+    // tile_layout / scissor / view[0] override are window-only
+    // letterboxing — applying them in XR collapses both eyes into one
+    // tile.
+    const bool xr_mode = backend_->is_xr();
+
+    // Per-layer aspect-fit tiles (window/offscreen only).
     std::vector<TileSlot> tiles;
-    if (!visible_layers.empty())
+    if (!xr_mode && !visible_layers.empty())
     {
         const float fb_aspect = static_cast<float>(rt_extent.width) / static_cast<float>(rt_extent.height);
         std::vector<float> aspects;
@@ -213,6 +234,14 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "vkBeginCommandBuffer");
 
+    // ts0: cmd-buffer-begin. vkCmdResetQueryPool is the spec-compliant
+    // reset (some drivers reset implicitly, but don't rely on it).
+    if (gpu_timestamp_pool_ != VK_NULL_HANDLE)
+    {
+        vkCmdResetQueryPool(command_buffer_, gpu_timestamp_pool_, 0, 4);
+        vkCmdWriteTimestamp(command_buffer_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, gpu_timestamp_pool_, 0);
+    }
+
     std::array<VkClearValue, 2> clears{};
     clears[0].color = config_.clear_color;
     clears[1].depthStencil = { 1.0f, 0 };
@@ -228,32 +257,56 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
 
     vkCmdBeginRenderPass(command_buffer_, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
-    // Per-layer: pre-bind scissor (tile.outer); per-layer ViewInfo
-    // gets viewport = tile.content.
+    // Window/offscreen: pre-bind scissor=tile.outer and override
+    // view[0].viewport=tile.content for aspect-fit letterboxing.
+    // XR: per-eye viewports come from frame->views.
+    if (xr_mode)
+    {
+        const VkRect2D rt_full{ { 0, 0 }, { rt_extent.width, rt_extent.height } };
+        vkCmdSetScissor(command_buffer_, 0, 1, &rt_full);
+    }
     for (size_t i = 0; i < visible_layers.size(); ++i)
     {
-        const VkRect2D scissor_rect = tiles[i].outer;
-        const VkRect2D viewport_rect = tiles[i].content;
-        vkCmdSetScissor(command_buffer_, 0, 1, &scissor_rect);
-
         std::vector<ViewInfo> layer_views = frame->views;
         if (layer_views.empty())
         {
             layer_views.push_back(ViewInfo{});
         }
-        layer_views[0].viewport = to_rect2d(viewport_rect);
+        if (!xr_mode)
+        {
+            const VkRect2D scissor_rect = tiles[i].outer;
+            const VkRect2D viewport_rect = tiles[i].content;
+            vkCmdSetScissor(command_buffer_, 0, 1, &scissor_rect);
+            layer_views[0].viewport = to_rect2d(viewport_rect);
+        }
         visible_layers[i]->record(command_buffer_, layer_views, rt);
     }
 
     vkCmdEndRenderPass(command_buffer_);
 
-    // Backend-specific post-render commands (blit + transitions etc.).
+    // ts1: end of render pass.
+    if (gpu_timestamp_pool_ != VK_NULL_HANDLE)
+    {
+        vkCmdWriteTimestamp(command_buffer_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpu_timestamp_pool_, 1);
+    }
+
     backend_->record_post_render_pass(command_buffer_, *frame);
+
+    // ts2: end of backend post-pass (ts2-ts1 = blit/transition cost).
+    if (gpu_timestamp_pool_ != VK_NULL_HANDLE)
+    {
+        vkCmdWriteTimestamp(command_buffer_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpu_timestamp_pool_, 2);
+    }
+
+    // ts3: cmd-buffer-end (total = ts3-ts0).
+    if (gpu_timestamp_pool_ != VK_NULL_HANDLE)
+    {
+        vkCmdWriteTimestamp(command_buffer_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpu_timestamp_pool_, 3);
+    }
 
     check_vk(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer");
 
-    // Layer waits (timeline) + backend's wait_before_render (binary,
-    // value 0 ignored).
+    // Layer timeline waits + backend binary wait_before_render (value=0).
     std::vector<VkSemaphore> wait_semaphores;
     std::vector<uint64_t> wait_values;
     std::vector<VkPipelineStageFlags> wait_stages;
@@ -302,19 +355,36 @@ void VizCompositor::render(const std::vector<LayerBase*>& layers)
     submit.signalSemaphoreCount = static_cast<uint32_t>(signal_semaphores.size());
     submit.pSignalSemaphores = signal_semaphores.empty() ? nullptr : signal_semaphores.data();
 
-    // Reset the fence immediately before submit. Anything that
-    // throws above this point leaves the fence signaled from the
-    // previous frame, so the next render()'s wait() won't deadlock.
-    // submit_or_signal_fence handles vkQueueSubmit failure by
-    // submitting an empty signal so the fence still transitions.
+    // Reset fence immediately before submit so any throw above leaves
+    // it signaled from the previous frame (next wait() won't deadlock).
     frame_sync_->reset();
     submit_or_signal_fence(submit, "vkQueueSubmit");
 
-    // Drain before end_frame: if end_frame throws, the cmd buffer is
-    // EXECUTABLE (resettable by CmdResetGuard) instead of PENDING.
-    // QuadLayer's mailbox also relies on this synchronous-frame
-    // contract — see quad_layer.hpp.
+    // Drain before end_frame: keeps the cmd buffer EXECUTABLE (not
+    // PENDING) if end_frame throws. QuadLayer's mailbox depends on
+    // this synchronous-frame contract — see quad_layer.hpp.
     frame_sync_->wait();
+
+    if (gpu_timestamp_pool_ != VK_NULL_HANDLE)
+    {
+        uint64_t ts[4] = { 0, 0, 0, 0 };
+        const VkResult r = vkGetQueryPoolResults(ctx_->device(), gpu_timestamp_pool_, 0, 4, sizeof(ts), ts,
+                                                 sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        if (r == VK_SUCCESS)
+        {
+            const auto delta_ms = [this](uint64_t a, uint64_t b)
+            {
+                if (b <= a)
+                {
+                    return 0.0f;
+                }
+                return static_cast<float>(static_cast<double>(b - a) * timestamp_period_ns_ / 1e6);
+            };
+            last_gpu_timing_.render_pass_ms = delta_ms(ts[0], ts[1]);
+            last_gpu_timing_.post_pass_ms = delta_ms(ts[1], ts[2]);
+            last_gpu_timing_.total_ms = delta_ms(ts[0], ts[3]);
+        }
+    }
 
     backend_->end_frame(*frame);
     frame_guard.released = true;

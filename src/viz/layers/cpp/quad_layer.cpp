@@ -1,12 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <viz/core/render_target.hpp>
 #include <viz/core/vk_context.hpp>
 #include <viz/layers/quad_layer.hpp>
+#include <viz/session/viz_session.hpp>
 #include <viz/shaders/textured_quad.frag.spv.h>
 #include <viz/shaders/textured_quad.vert.spv.h>
 
+#include <cstdint>
+#include <cstring>
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
@@ -56,18 +61,36 @@ void require_alive(const std::unique_ptr<DeviceImage>& slot0, const char* what)
     }
 }
 
+// Mirrors textured_quad.vert's push_constant block.
+//   mode = 0 → NDC-cover triangle, mvp ignored.
+//   mode = 1 → 3D placed quad, mvp transforms local [-0.5, 0.5] to clip.
+struct QuadShaderData
+{
+    float mvp[16];
+    int32_t mode;
+};
+static_assert(sizeof(QuadShaderData) == sizeof(float) * 16 + sizeof(int32_t),
+              "QuadShaderData layout must match textured_quad.vert");
+
+// M = T(pose.position) · R(pose.orientation) · S(size.x, -size.y, 1).
+// Negative Y on the scale matches Vulkan clip-space Y-down.
+glm::mat4 placement_mvp(const QuadLayer::Config::Placement& p, const ViewInfo& view)
+{
+    glm::mat4 model = glm::translate(glm::mat4(1.0f), p.pose.position);
+    model *= glm::mat4_cast(p.pose.orientation);
+    model = glm::scale(model, glm::vec3(p.size_meters.x, -p.size_meters.y, 1.0f));
+    return view.projection_matrix * view.view_matrix * model;
+}
+
 } // namespace
 
 QuadLayer::QuadLayer(const VkContext& ctx, VkRenderPass render_pass, Config config)
     : LayerBase(config.name), ctx_(&ctx), render_pass_(render_pass), config_(std::move(config))
 {
-    // Cheap-first config checks, then argument shape, then context
-    // state. Tests can exercise each path by varying just the
-    // relevant argument with an uninitialized VkContext.
+    // textured_quad's frag samples a color image; depth views aren't
+    // color-samplable.
     if (config_.format != PixelFormat::kRGBA8)
     {
-        // textured_quad samples color; depth (kD32F) would create a
-        // depth-aspect view that can't be sampled as color.
         throw std::invalid_argument("QuadLayer: only PixelFormat::kRGBA8 is supported");
     }
     if (config_.resolution.width == 0 || config_.resolution.height == 0)
@@ -82,6 +105,15 @@ QuadLayer::QuadLayer(const VkContext& ctx, VkRenderPass render_pass, Config conf
     {
         throw std::invalid_argument("QuadLayer: VkContext is not initialized");
     }
+    if (config_.placement.has_value())
+    {
+        const auto& ext = config_.placement->size_meters;
+        if (ext.x <= 0.0f || ext.y <= 0.0f)
+        {
+            throw std::invalid_argument("QuadLayer: Placement::size_meters must be > 0 in both components");
+        }
+    }
+    placement_ = config_.placement;
     init();
 }
 
@@ -275,22 +307,57 @@ void QuadLayer::record(VkCommandBuffer cmd, const std::vector<ViewInfo>& views, 
     vkCmdBindDescriptorSets(
         cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 0, 1, &descriptor_sets_[cur], 0, nullptr);
 
-    // 1 view in window/offscreen, 2 in XR stereo. Compositor pre-bound
-    // the layer's scissor; we bind viewport per view and draw.
+    // Snapshot under lock so set_placement() can run concurrently.
+    std::optional<Config::Placement> placement;
+    {
+        std::lock_guard<std::mutex> lk(placement_mutex_);
+        placement = placement_;
+    }
+    const bool xr_mode = session() != nullptr && session()->is_xr_mode();
+    if (xr_mode && !placement.has_value())
+    {
+        throw std::logic_error(
+            "QuadLayer: XR mode requires Config::placement to be set "
+            "(fullscreen quads in stereo XR are not supported)");
+    }
+
+    // xr: 4-vertex triangle strip; else: 3-vertex NDC-cover triangle.
+    const uint32_t vertex_count = xr_mode ? 4u : 3u;
+
+    // Compositor pre-binds the layer's scissor; we set per-view viewport.
     for (const auto& view : views)
     {
         bind_view_viewport(cmd, view);
-        // 3 vertices, no vertex buffer — vertex shader emits a
-        // fullscreen triangle from gl_VertexIndex.
-        vkCmdDraw(cmd, 3, 1, 0, 0);
+
+        QuadShaderData data{};
+        if (xr_mode)
+        {
+            const glm::mat4 mvp = placement_mvp(*placement, view);
+            std::memcpy(data.mvp, &mvp[0][0], sizeof(data.mvp));
+            data.mode = 1;
+        }
+        // mode=0 (default): MVP unused.
+        vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(data), &data);
+        vkCmdDraw(cmd, vertex_count, 1, 0, 0);
     }
+}
+
+void QuadLayer::set_placement(std::optional<Config::Placement> placement) noexcept
+{
+    std::lock_guard<std::mutex> lk(placement_mutex_);
+    placement_ = std::move(placement);
+}
+
+std::optional<QuadLayer::Config::Placement> QuadLayer::placement() const noexcept
+{
+    std::lock_guard<std::mutex> lk(placement_mutex_);
+    return placement_;
 }
 
 std::vector<LayerBase::WaitSemaphore> QuadLayer::get_wait_semaphores() const
 {
-    // VizCompositor calls record() first (which promotes latest_ ->
-    // in_use_), then this. So in_use_ is the slot the draw will
-    // sample, and that's what we need the GPU to wait on.
+    // Compositor calls record() first (promotes latest_ → in_use_),
+    // so in_use_ is the slot the draw will sample.
     const uint8_t cur = in_use_.load(std::memory_order_acquire);
     if (cur == kSlotNone || !slots_[cur])
     {
@@ -351,11 +418,19 @@ void QuadLayer::create_descriptor_set_layout()
 
 void QuadLayer::create_pipeline_layout()
 {
+    // Push constants: mat4 mvp + int32 mode = 68 bytes, well under
+    // the spec's 128-byte minimum guarantee.
+    VkPushConstantRange pc_range{};
+    pc_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pc_range.offset = 0;
+    pc_range.size = sizeof(float) * 16 + sizeof(int32_t);
+
     VkPipelineLayoutCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     info.setLayoutCount = 1;
     info.pSetLayouts = &descriptor_set_layout_;
-    info.pushConstantRangeCount = 0;
+    info.pushConstantRangeCount = 1;
+    info.pPushConstantRanges = &pc_range;
     check_vk(vkCreatePipelineLayout(ctx_->device(), &info, nullptr, &pipeline_layout_), "vkCreatePipelineLayout");
 }
 
@@ -402,7 +477,10 @@ void QuadLayer::create_pipeline()
 
     VkPipelineInputAssemblyStateCreateInfo input_assembly{};
     input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    // TRIANGLE_STRIP works for both render modes (see textured_quad.vert):
+    //   3 verts → 1 triangle (fullscreen pass; same as TRIANGLE_LIST)
+    //   4 verts → 2 triangles (3D placed quad)
+    input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
 
     // Viewport / scissor are dynamic so one pipeline works across
     // resolutions.
@@ -423,10 +501,17 @@ void QuadLayer::create_pipeline()
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
     // Depth disabled — fullscreen blits don't need it.
+    // Depth on so XR backends can submit XrCompositionLayerDepthInfoKHR
+    // alongside the projection layer (CloudXR uses depth for server-
+    // side reprojection). LESS_OR_EQUAL keeps last-wins semantics for
+    // overlapping layers when multiple QuadLayers stack at z = 0
+    // (fullscreen mode); meaningful for true depth-sort once 3D-placed
+    // QuadLayers are in active use.
     VkPipelineDepthStencilStateCreateInfo depth_stencil{};
     depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depth_stencil.depthTestEnable = VK_FALSE;
-    depth_stencil.depthWriteEnable = VK_FALSE;
+    depth_stencil.depthTestEnable = VK_TRUE;
+    depth_stencil.depthWriteEnable = VK_TRUE;
+    depth_stencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
 
     VkPipelineColorBlendAttachmentState blend_attachment{};
     blend_attachment.blendEnable = VK_FALSE;
