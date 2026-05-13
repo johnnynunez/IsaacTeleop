@@ -14,37 +14,38 @@ namespace core
 {
 
 /*!
- * @brief Facade for an external upper-body / arm-gesture skeleton, exposed as
+ * @brief Facade for an external worn skeleton/exoskeleton, exposed as
  *        ``ExternalSkeletonPoseTrackedT``.
  *
  * The tracker is vendor-neutral: its data source is a separate plugin process
- * (e.g. ``external_skeleton_plugin``) that reads from a third-party mocap
- * device (Rokoko Smartsuit, Xsens / Movella MVN, Sony mocopi, Noitom
- * Perception Neuron, OptiTrack, etc.) and pushes ``ExternalSkeletonPose``
- * FlatBuffers via ``XR_NVX1_push_tensor``. The live backend reads them via
- * ``XR_NVX1_tensor_data`` (see ``LiveExternalSkeletonTrackerImpl``).
+ * (e.g. ``external_skeleton_plugin``) that reads joint state from a worn
+ * mechanical exoskeleton (e.g. Dexmate Vega via ``omniteleop``) and pushes
+ * ``ExternalSkeletonPose`` FlatBuffers via ``XR_NVX1_push_tensor``. The live
+ * backend reads them via ``XR_NVX1_tensor_data`` (see
+ * ``LiveExternalSkeletonTrackerImpl``).
  *
- * Joint layout follows ``ExternalSkeletonJoint`` (14 upper-body joints).
+ * Data shape is per-arm joint-angle vectors (``ExoArmJointState``); see
+ * ``src/core/schema/fbs/external_skeleton.fbs``. Joint counts may differ
+ * between arms and across devices; the upstream device/config is the source
+ * of truth for index ordering.
  *
  * Usage:
  * @code
- * auto tracker = std::make_shared<ExternalSkeletonTracker>("rokoko_skeleton");
+ * auto tracker = std::make_shared<ExternalSkeletonTracker>("dexmate_exo");
  * // ... register with a session, then each tick:
  * session->update();
  * const auto& tracked = tracker->get_skeleton_pose(*session);
- * if (tracked.data) {
- *     // safe to read tracked.data->joints, source_id, etc.
+ * if (tracked.data && tracked.data->left_arm) {
+ *     // safe to read tracked.data->left_arm->positions_radians, etc.
  * }
  * @endcode
  */
 class ExternalSkeletonTracker : public ITracker
 {
 public:
-    //! Number of joints in the ExternalSkeletonJoint layout.
-    static constexpr uint32_t JOINT_COUNT = 14;
-
     //! Default maximum FlatBuffer size for ExternalSkeletonPose messages.
-    //! Sized for 14 BodyJointPose entries + flags + a short source_id string.
+    //! Sized for ~16 joints/arm × 2 arms × 2 fields (pos + vel) of float32
+    //! plus a short source_id string and FlatBuffer overhead.
     static constexpr size_t DEFAULT_MAX_FLATBUFFER_SIZE = 2048;
 
     /*!

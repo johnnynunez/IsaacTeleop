@@ -3,6 +3,8 @@
 
 #include "synthetic_skeleton_source.hpp"
 
+#include <oxr_utils/os_time.hpp>
+
 #include <cmath>
 
 namespace plugins
@@ -15,28 +17,24 @@ namespace
 
 constexpr float kPi = 3.14159265358979323846f;
 
-// Stylized rest-pose offsets in metres for each ExternalSkeletonJoint index.
-// Coordinates: +X right, +Y up, +Z forward (matches schema/pose.fbs convention).
-constexpr float kRestPositions[core::ExternalSkeletonJoint_NUM_JOINTS][3] = {
-    { 0.00f, 0.00f, 0.00f }, // ROOT
-    { 0.00f, 0.95f, 0.00f }, // HIPS
-    { 0.00f, 1.15f, 0.00f }, // SPINE
-    { 0.00f, 1.35f, 0.00f }, // CHEST
-    { 0.00f, 1.55f, 0.00f }, // NECK
-    { 0.00f, 1.70f, 0.00f }, // HEAD
-    { -0.18f, 1.50f, 0.00f }, // LEFT_SHOULDER
-    { -0.18f, 1.30f, 0.00f }, // LEFT_UPPER_ARM
-    { -0.18f, 1.05f, 0.00f }, // LEFT_LOWER_ARM
-    { -0.18f, 0.85f, 0.00f }, // LEFT_HAND
-    { 0.18f, 1.50f, 0.00f }, // RIGHT_SHOULDER
-    { 0.18f, 1.30f, 0.00f }, // RIGHT_UPPER_ARM
-    { 0.18f, 1.05f, 0.00f }, // RIGHT_LOWER_ARM
-    { 0.18f, 0.85f, 0.00f }, // RIGHT_HAND
-};
+// Sized to match Dexmate Vega's per-arm DOF (see PUBLISH_THRESHOLD in
+// omniteleop's leader/arm_reader.py: 7 joints per arm). Easy to grow if
+// you point the synthetic source at a different downstream config.
+constexpr uint32_t kJointsPerArm = 7;
 
-core::Pose make_pose(float x, float y, float z)
+void fill_arm(core::ExoArmJointStateT& arm, float t, float phase)
 {
-    return core::Pose(core::Point(x, y, z), core::Quaternion(0.0f, 0.0f, 0.0f, 1.0f));
+    arm.positions_radians.resize(kJointsPerArm);
+    arm.velocities_radians_per_sec.resize(kJointsPerArm);
+    for (uint32_t j = 0; j < kJointsPerArm; ++j)
+    {
+        // Offset each joint by a small phase so the wave is visible across
+        // the chain rather than every joint moving identically.
+        const float w = 2.0f * kPi * 0.5f; // 0.5 Hz fundamental
+        const float p = phase + 0.25f * static_cast<float>(j);
+        arm.positions_radians[j] = 0.5f * std::sin(w * t + p);
+        arm.velocities_radians_per_sec[j] = 0.5f * w * std::cos(w * t + p);
+    }
 }
 
 } // namespace
@@ -49,38 +47,23 @@ bool SyntheticSkeletonSource::poll(core::ExternalSkeletonPoseT& out, int64_t& ra
 {
     const auto now = std::chrono::steady_clock::now();
     const float t = std::chrono::duration<float>(now - start_).count();
-    const float wave = 0.25f * std::sin(2.0f * kPi * 0.5f * t); // ~0.5 Hz wave
 
-    if (!out.joints)
+    if (!out.left_arm)
     {
-        out.joints = std::make_shared<core::ExternalSkeletonJoints>();
+        out.left_arm = std::make_shared<core::ExoArmJointStateT>();
     }
-
-    for (uint32_t i = 0; i < core::ExternalSkeletonJoint_NUM_JOINTS; ++i)
+    if (!out.right_arm)
     {
-        float x = kRestPositions[i][0];
-        const float y = kRestPositions[i][1];
-        const float z = kRestPositions[i][2];
-
-        // Animate both hands and forearms left/right to produce a visible wave.
-        const bool is_arm = (i == core::ExternalSkeletonJoint_LEFT_LOWER_ARM ||
-                             i == core::ExternalSkeletonJoint_LEFT_HAND ||
-                             i == core::ExternalSkeletonJoint_RIGHT_LOWER_ARM ||
-                             i == core::ExternalSkeletonJoint_RIGHT_HAND);
-        if (is_arm)
-        {
-            x += wave * (x < 0.0f ? -1.0f : 1.0f);
-        }
-
-        out.joints->mutable_joints()->Mutate(i, core::BodyJointPose(make_pose(x, y, z), /*is_valid=*/true));
+        out.right_arm = std::make_shared<core::ExoArmJointStateT>();
     }
+    fill_arm(*out.left_arm, t, /*phase=*/0.0f);
+    fill_arm(*out.right_arm, t, /*phase=*/kPi); // anti-phase so left/right are visually distinguishable
 
-    out.all_joint_poses_tracked = true;
     out.source_id = source_id();
-
-    // No device clock available for synthetic data; let the caller substitute
-    // the local monotonic clock by leaving this at zero (sentinel).
-    raw_device_clock_ns = 0;
+    // Synthetic source has no device clock; surface the local monotonic clock
+    // so downstream consumers still see a strictly monotonic device timestamp.
+    out.device_timestamp_ns = core::os_monotonic_now_ns();
+    raw_device_clock_ns = out.device_timestamp_ns;
     return true;
 }
 
