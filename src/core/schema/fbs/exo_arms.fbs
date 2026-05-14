@@ -1,0 +1,42 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+include "timestamp.fbs";
+
+namespace core;
+
+// Output from a dual-arm exoskeleton device (e.g. Dexmate Vega exoskeleton: 7 DOF per arm,
+// driven by Dynamixel motors). Sizes of the vectors are device-defined and equal across the
+// pos/vel pair for each arm (e.g. 7 for the Vega exo); empty vectors mean that arm is not
+// active. Velocity vectors may also be empty if the upstream producer was configured without
+// velocity reading (e.g. exoskeleton_plugin.py launched without ``--read-velocity``).
+//
+// All fields are always present when the parent Tracked/Record wrapper's data is non-null.
+table ExoArmsOutput {
+  // Left arm joint positions in radians, ordered shoulder→wrist (motor IDs as configured upstream).
+  left_arm_pos: [float] (id: 0);
+
+  // Left arm joint velocities in rad/s, same ordering as left_arm_pos. Empty if disabled.
+  left_arm_vel: [float] (id: 1);
+
+  // Right arm joint positions in radians, ordered shoulder→wrist.
+  right_arm_pos: [float] (id: 2);
+
+  // Right arm joint velocities in rad/s, same ordering as right_arm_pos. Empty if disabled.
+  right_arm_vel: [float] (id: 3);
+}
+
+// Tracked wrapper for the in-memory tracker API (data is null when no exo data has been
+// received yet or the OpenXR tensor collection is unavailable).
+table ExoArmsOutputTracked {
+    data: ExoArmsOutput (id: 0);
+}
+
+// MCAP recording wrapper for ExoArmsOutput. Trackers serialize into Record types via their
+// serialize() method, but the public query API returns the inner data type directly.
+table ExoArmsOutputRecord {
+    data: ExoArmsOutput (id: 0);
+    timestamp: DeviceDataTimestamp (id: 1);
+}
+
+root_type ExoArmsOutputRecord;

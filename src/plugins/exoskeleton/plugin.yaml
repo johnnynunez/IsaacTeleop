@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: exoskeleton
+description: "Dual-arm Dynamixel exoskeleton (e.g. Dexmate Vega) reader"
+command: "python3 exoskeleton_plugin.py"
+version: "1.0.0"
+devices:
+  - path: "/exo/arms"
+    type: "exo_arms"
+    description: "Dual-arm exoskeleton joint positions/velocities read directly from the Dynamixel bus"

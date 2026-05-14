@@ -4,6 +4,7 @@
 #include "inc/live_trackers/live_deviceio_factory.hpp"
 
 #include "live_controller_tracker_impl.hpp"
+#include "live_exo_arms_tracker_impl.hpp"
 #include "live_frame_metadata_tracker_oak_impl.hpp"
 #include "live_full_body_tracker_pico_impl.hpp"
 #include "live_generic_3axis_pedal_tracker_impl.hpp"
@@ -12,6 +13,7 @@
 #include "live_message_channel_tracker_impl.hpp"
 
 #include <deviceio_trackers/controller_tracker.hpp>
+#include <deviceio_trackers/exo_arms_tracker.hpp>
 #include <deviceio_trackers/frame_metadata_tracker_oak.hpp>
 #include <deviceio_trackers/full_body_tracker_pico.hpp>
 #include <deviceio_trackers/generic_3axis_pedal_tracker.hpp>
@@ -79,6 +81,12 @@ std::unique_ptr<ITrackerImpl> try_create_generic_pedal_impl(LiveDeviceIOFactory&
     return typed ? factory.create_generic_3axis_pedal_tracker_impl(typed) : nullptr;
 }
 
+std::unique_ptr<ITrackerImpl> try_create_exo_arms_impl(LiveDeviceIOFactory& factory, const ITracker& tracker)
+{
+    auto* typed = dynamic_cast<const ExoArmsTracker*>(&tracker);
+    return typed ? factory.create_exo_arms_tracker_impl(typed) : nullptr;
+}
+
 std::unique_ptr<ITrackerImpl> try_create_oak_impl(LiveDeviceIOFactory& factory, const ITracker& tracker)
 {
     auto* typed = dynamic_cast<const FrameMetadataTrackerOak*>(&tracker);
@@ -102,6 +110,7 @@ inline const TrackerDispatchEntry k_tracker_dispatch[] = {
     { &try_add_extensions<MessageChannelTracker, LiveMessageChannelTrackerImpl>, &try_create_message_channel_impl },
     { &try_add_extensions<FullBodyTrackerPico, LiveFullBodyTrackerPicoImpl>, &try_create_full_body_pico_impl },
     { &try_add_extensions<Generic3AxisPedalTracker, LiveGeneric3AxisPedalTrackerImpl>, &try_create_generic_pedal_impl },
+    { &try_add_extensions<ExoArmsTracker, LiveExoArmsTrackerImpl>, &try_create_exo_arms_impl },
     { &try_add_extensions<FrameMetadataTrackerOak, LiveFrameMetadataTrackerOakImpl>, &try_create_oak_impl },
 };
 
@@ -242,6 +251,16 @@ std::unique_ptr<IGeneric3AxisPedalTrackerImpl> LiveDeviceIOFactory::create_gener
         channels = LiveGeneric3AxisPedalTrackerImpl::create_mcap_channels(*writer_, get_name(tracker));
     }
     return std::make_unique<LiveGeneric3AxisPedalTrackerImpl>(handles_, tracker, std::move(channels));
+}
+
+std::unique_ptr<IExoArmsTrackerImpl> LiveDeviceIOFactory::create_exo_arms_tracker_impl(const ExoArmsTracker* tracker)
+{
+    std::unique_ptr<ExoArmsMcapChannels> channels;
+    if (should_record(tracker))
+    {
+        channels = LiveExoArmsTrackerImpl::create_mcap_channels(*writer_, get_name(tracker));
+    }
+    return std::make_unique<LiveExoArmsTrackerImpl>(handles_, tracker, std::move(channels));
 }
 
 std::unique_ptr<IFrameMetadataTrackerOakImpl> LiveDeviceIOFactory::create_frame_metadata_tracker_oak_impl(

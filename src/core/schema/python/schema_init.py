@@ -35,6 +35,10 @@ from ._schema import (
     Generic3AxisPedalOutput,
     Generic3AxisPedalOutputTrackedT,
     Generic3AxisPedalOutputRecord,
+    # Exoskeleton-arms-related types.
+    ExoArmsOutput,
+    ExoArmsOutputTrackedT,
+    ExoArmsOutputRecord,
     # Message channel types.
     MessageChannelMessages,
     MessageChannelMessagesTrackedT,
@@ -82,6 +86,10 @@ __all__ = [
     "Generic3AxisPedalOutput",
     "Generic3AxisPedalOutputTrackedT",
     "Generic3AxisPedalOutputRecord",
+    # Exoskeleton arms types.
+    "ExoArmsOutput",
+    "ExoArmsOutputTrackedT",
+    "ExoArmsOutputRecord",
     # Message channel types.
     "MessageChannelMessages",
     "MessageChannelMessagesTrackedT",

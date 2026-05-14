@@ -52,6 +52,13 @@ struct PedalRecordingTraits
     static constexpr std::array replay_channels = { "pedals_tracked" };
 };
 
+struct ExoArmsRecordingTraits
+{
+    static constexpr std::string_view schema_name = "core.ExoArmsOutputRecord";
+    static constexpr std::array recording_channels = { "exo_arms", "exo_arms_tracked" };
+    static constexpr std::array replay_channels = { "exo_arms_tracked" };
+};
+
 struct OakRecordingTraits
 {
     static constexpr std::string_view schema_name = "core.FrameMetadataOakRecord";

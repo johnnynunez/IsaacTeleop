@@ -1,0 +1,8 @@
+# Optional runtime deps needed by the exoskeleton plugin (src/plugins/exoskeleton).
+# Install via: `pip install isaacteleop[exoskeleton]`.
+#
+# dynamixel-sdk is ROBOTIS's official Python SDK for Dynamixel servos. The
+# exoskeleton plugin owns the serial bus directly (PortHandler + PacketHandler
+# + GroupBulkRead) to read each arm's joint positions/velocities, then pushes
+# the snapshot into the OpenXR tensor collection consumed by ExoArmsTracker.
+dynamixel-sdk>=3.7.31

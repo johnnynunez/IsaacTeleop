@@ -32,6 +32,7 @@ optional-dependencies.retargeters = {file = ["requirements-retargeters.txt"]}
 optional-dependencies.retargeters-lite = {file = ["requirements-retargeters-lite.txt"]}
 optional-dependencies.grounding = {file = ["requirements-grounding.txt"]}
 optional-dependencies.cloudxr = {file = ["requirements-cloudxr.txt"]}
+optional-dependencies.exoskeleton = {file = ["requirements-exoskeleton.txt"]}
 
 [tool.setuptools]
 packages = [
@@ -42,6 +43,7 @@ packages = [
     "isaacteleop.mcap",
     "isaacteleop.oxr",
     "isaacteleop.plugin_manager",
+    "isaacteleop.pusherio",
     "isaacteleop.schema",
     "isaacteleop.retargeting_engine",
     "isaacteleop.retargeting_engine.interface",
@@ -64,6 +66,7 @@ isaacteleop = ["*.so", "*.pyd", "*.pyi", "py.typed"]
 "isaacteleop.mcap" = ["*.so", "*.pyd", "*.pyi"]
 "isaacteleop.oxr" = ["*.so", "*.pyd", "*.pyi"]
 "isaacteleop.plugin_manager" = ["*.so", "*.pyd", "*.pyi"]
+"isaacteleop.pusherio" = ["*.so", "*.pyd", "*.pyi"]
 "isaacteleop.schema" = ["*.so", "*.pyd", "*.pyi"]
 "isaacteleop.cloudxr" = ["native/*.so", "native/*.so.*", "native/openxr_cloudxr.json"]
 @VIZ_PACKAGE_DATA_BLOCK@@ROBOTIC_GROUNDING_PACKAGE_DATA_BLOCK@

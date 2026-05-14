@@ -5,3 +5,9 @@ cmake_minimum_required(VERSION 3.20)
 
 # Build C++ library
 add_subdirectory(cpp)
+
+# Python bindings (optional, controlled by parent option BUILD_PYTHON_BINDINGS
+# inherited from src/core/CMakeLists.txt).
+if(BUILD_PYTHON_BINDINGS)
+    add_subdirectory(python)
+endif()
