@@ -41,7 +41,23 @@ class VkContext;
 // image_count ever exceeds kMaxFramesInFlight, record() asserts —
 // bump kMaxFramesInFlight and kSlotCount together.
 //
-// Memory: kSlotCount × width × height × bpp (~40 MB at 1080p RGBA8).
+// Memory: kSlotCount × width × height × bpp.
+//   mono   1080p RGBA8: ~56 MB / layer
+//   mono   4K    RGBA8: ~232 MB / layer
+//   stereo 1080p RGBA8: ~112 MB / layer (×2 from paired slots)
+//   stereo 4K    RGBA8: ~464 MB / layer
+// With ``generate_mipmaps`` on (default), add ~33% for the mip chain.
+// A single 4K stereo layer with mips is ~620 MB — sizing concern for
+// the host's VRAM budget and worth surfacing to whoever picks the
+// resolution / layer count.
+//
+// Stereo: when Config::stereo is true, each slot owns a PAIR of
+// DeviceImages (left + right). The two-arg submit() does both
+// memcpy2Ds + the cuda_done_writing signal on a single CUDA stream,
+// so stream ordering guarantees the renderer never sees a half-
+// updated pair. In kXr, record() binds the left descriptor for
+// view 0 and the right for view 1; window/offscreen (single view)
+// draws the left buffer only.
 class QuadLayer : public LayerBase
 {
 public:
@@ -84,6 +100,25 @@ public:
         // Set to false to save the ~33% extra image memory on layers
         // that are always sampled at native resolution.
         bool generate_mipmaps = true;
+
+        // Stereo mode. When true, the layer owns a paired left+right
+        // mailbox; submit MUST be called with both buffers. In kXr,
+        // view 0 (left eye) samples the left buffer and view 1 (right
+        // eye) the right. In window/offscreen the left buffer is drawn
+        // and the right is allocated but unused. Memory doubles.
+        bool stereo = false;
+
+        // Horizontal disparity between the left-plane (in the left eye)
+        // and the right-plane (in the right eye), in millimeters along
+        // the placement's local +x axis. Each eye's quad center is
+        // shifted by ±stereo_baseline_mm/2 (left eye: −, right eye: +).
+        // 0 means both eyes see the same world-space quad; all stereo
+        // cues come from the captured images. Positive values let the
+        // planes splay outward (virtual screen further back); negative
+        // makes them cross (closer to viewer). Ignored when stereo is
+        // false or outside kXr. mm-scale chosen because typical real-
+        // world IPDs and camera baselines are 50–80 mm.
+        float stereo_baseline_mm = 0.0f;
     };
 
     // Hard cap on the mip chain when generate_mipmaps is enabled.
@@ -110,7 +145,31 @@ public:
     // producer wrapping its mailbox could overwrite src.data while our
     // async memcpy was still reading. Cost: ~0.5 ms per 1080p call on
     // the calling thread; the render path is unaffected.
+    //
+    // Mono layer (Config::stereo == false): use the one-arg overload.
+    // The two-arg overload throws std::logic_error.
+    //
+    // Stereo layer (Config::stereo == true): use the two-arg overload.
+    // Both buffers are copied + the single cuda_done_writing signal is
+    // emitted on the SAME ``stream``, so stream ordering guarantees
+    // the renderer never reads a half-matched pair. The one-arg
+    // overload throws std::logic_error.
+    //
+    // STREAM PRECONDITION (stereo): the two-arg overload runs the copies
+    // for BOTH eyes on the single ``stream`` argument. CUDA's stream
+    // ordering only sequences work submitted to the SAME stream, so
+    // when ``left.data`` or ``right.data`` was produced on a different
+    // stream than ``stream``, the caller MUST synchronize that producer
+    // stream before calling submit (cudaStreamSynchronize, or a recorded
+    // event waited on ``stream`` via cudaStreamWaitEvent). Otherwise the
+    // memcpy here can read stale / torn pixels for that eye. The
+    // in-tree ZED + OAK-D producers handle this by calling
+    // ``cu_stream.synchronize()`` per eye-slot before publishing, which
+    // makes calling ``submit(left, right, stream=0)`` safe; external
+    // producers wiring separate per-eye streams must follow the same
+    // pattern.
     void submit(const VizBuffer& src, cudaStream_t stream = 0);
+    void submit(const VizBuffer& left, const VizBuffer& right, cudaStream_t stream = 0);
 
     // Pre-pass slot: promote latest_ -> in_use_[in_flight_slot] AND
     // (when generate_mipmaps is on) emit the mip-chain blits on the
@@ -141,8 +200,10 @@ public:
     void set_placement(std::optional<Config::Placement> placement) noexcept;
     std::optional<Config::Placement> placement() const noexcept;
 
-    // Diagnostic accessor; nullptr for slots beyond kSlotCount.
+    // Diagnostic accessor; nullptr for slots beyond kSlotCount, and
+    // device_image_right is null on mono layers.
     const DeviceImage* device_image(uint32_t slot) const noexcept;
+    const DeviceImage* device_image_right(uint32_t slot) const noexcept;
 
 private:
     void init();
@@ -178,8 +239,10 @@ private:
     // Number of mip levels per DeviceImage slot. 1 when mips disabled.
     uint32_t mip_levels_ = 1;
 
-    // One DeviceImage per mailbox slot.
+    // One DeviceImage per mailbox slot. ``slots_`` is the left/mono
+    // image; ``slots_right_`` only allocated when Config::stereo.
     std::array<std::unique_ptr<DeviceImage>, kSlotCount> slots_;
+    std::array<std::unique_ptr<DeviceImage>, kSlotCount> slots_right_;
 
     VkSampler sampler_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptor_set_layout_ = VK_NULL_HANDLE;
@@ -188,7 +251,9 @@ private:
 
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
     // One descriptor set per slot — record() binds the one for in_use_.
+    // ``descriptor_sets_right_`` is only populated when Config::stereo.
     std::array<VkDescriptorSet, kSlotCount> descriptor_sets_{};
+    std::array<VkDescriptorSet, kSlotCount> descriptor_sets_right_{};
 
     // Mailbox: latest_ = most recent publish. in_use_[i] = slot the
     // i-th in-flight frame is sampling. Atomic so producer and
