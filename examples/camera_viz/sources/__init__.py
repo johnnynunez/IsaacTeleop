@@ -8,12 +8,12 @@ contract — the teleop hot path never round-trips through host memory.
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from pipeline import FrameSource
 
 from ._helpers import PairedFrameSource, set_verbose
-from .oakd import OakdSource
+from .oakd import OakdSource, _EncoderParams as _OakdEncoderParams
 from .rtp_h264 import RtpH264Source
 from .synthetic import SyntheticSource, SyntheticStereoSource
 from .v4l2 import V4l2Source
@@ -32,15 +32,27 @@ __all__ = [
 ]
 
 
-def build_local_camera(spec: dict) -> List[FrameSource]:
+def build_local_camera(spec: dict, encoded: bool = False) -> List[FrameSource]:
     """Build local FrameSource(s) for one ``cameras:`` entry.
 
     Mono → [source]; ``stereo: true`` → [PairedFrameSource]. v4l2 rejects
     stereo (UVC is mono). Shared by camera_viz + camera_streamer.
+
+    ``encoded=True`` is camera_streamer-only and only supported by
+    ``type: oakd`` — it asks the device's on-board VPU to emit H.264
+    NALs in place of raw frames. Stereo encoded returns one
+    ``PairedFrameSource`` whose left/right each carry encoded packets;
+    the streamer unwraps them into two RTP senders just like the raw
+    stereo path.
     """
     kind = spec["type"]
     stereo = bool(spec.get("stereo", False))
     name = spec["name"]
+    if encoded and kind != "oakd":
+        raise ValueError(
+            f"build_local_camera: encoded=True is only supported by type: oakd "
+            f"(camera {name!r} is type: {kind}). Use encoder: native or gstreamer instead."
+        )
     if kind == "synthetic":
         if stereo:
             return [
@@ -81,6 +93,15 @@ def build_local_camera(spec: dict) -> List[FrameSource]:
     if kind == "oakd":
         # ``stereo: true`` shorthand for ``mode: stereo``; explicit mode wins.
         mode = spec.get("mode", "stereo" if stereo else "mono")
+        encoder_params: Optional[_OakdEncoderParams] = None
+        if encoded:
+            rtp = spec.get("rtp", {})
+            fps = int(spec.get("fps", 30))
+            encoder_params = _OakdEncoderParams(
+                bitrate=int(rtp.get("bitrate_mbps", 15)) * 1_000_000,
+                profile=str(rtp.get("vpu_profile", "main")).lower(),
+                keyframe_frequency=int(rtp["gop"]) if "gop" in rtp else fps * 5,
+            )
         eyes = list(
             OakdSource.build(
                 base_name=name,
@@ -93,6 +114,8 @@ def build_local_camera(spec: dict) -> List[FrameSource]:
                 rgb_width=int(spec.get("rgb_width", 0)),
                 rgb_height=int(spec.get("rgb_height", 0)),
                 rgb_fps=int(spec.get("rgb_fps", 0)),
+                encoded=encoded,
+                encoder_params=encoder_params,
             )
         )
         if stereo or mode in ("stereo", "stereo_rgb"):

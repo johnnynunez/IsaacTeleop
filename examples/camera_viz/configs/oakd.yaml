@@ -1,29 +1,42 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# OAK-D (mono RGB) — same YAML drives camera_viz + camera_streamer.
+# OAK-D — same YAML drives camera_viz + camera_streamer.
 #
-# Mono-only by design until per-eye QuadLayer binding lands (see memory
-# note "Stereo XR rendering needs per-view QuadLayer buffers"). Stereo
-# OAK-D would otherwise render the same plane to both eyes — misleading.
+# Modes (set ``mode:`` or use the ``stereo: true`` shorthand):
+#   mono        — single sensor (``camera_socket``), BGR over USB.
+#   stereo      — LEFT + RIGHT mono sensors, GRAY8 over USB (halves
+#                 bandwidth; sensors are monochrome anyway), broadcast
+#                 to RGBA on the GPU. Wired through PairedFrameSource
+#                 into a stereo QuadLayer.
+#   stereo_rgb  — stereo + RGB; the RGB stream is captured but dropped
+#                 at the camera_viz boundary (not rendered).
 #
-# RTP path: OAK-D's USB raw BGR frames go through depthai's
-# getCvFrame() (BGR888p → packed BGR) which the GPU kernel converts to
-# RGBA, then our NVENC encodes to H.264 (BT.709 limited-range). Future
-# work: opt-in to OAK-D's on-device VPU encoder to skip the host-side
-# NVENC entirely (would emit BT.601 full-range and require the decoder
-# to switch matrices — not yet wired).
+# RTP host path (default ``encoder: native|gstreamer|auto``): depthai's
+# ``getCvFrame()`` packs BGR888p → HxWx3 BGR on the host, the GPU
+# channel-swaps to RGBA, and NVENC feeds it through the shared
+# rgba_to_nv12 kernel — BT.601 full-range, matched by the decoder's
+# default full_range=true.
+#
+# RTP VPU path (``rtp.encoder: vpu``, OAK-D only, opt-in): the device's
+# Myriad-X ``dai.node.VideoEncoder`` consumes camera ISP NV12 directly
+# and emits H.264 NALs over USB; we forward straight into rtph264pay,
+# bypassing the host BGR→RGBA→NV12 path and the NVENC session entirely.
+# ``encoder: auto`` never picks vpu — the bitstream contract is different
+# (no host-side rate adaptation, no per-frame error recovery), so it
+# must be opted into explicitly. Stereo VPU = two encoders on the
+# Myriad-X, two RTP ports, exactly mirroring the raw stereo wiring.
 
 source: local                   # local | rtp
 streaming:
   host: 127.0.0.1
-encoder: auto                   # auto | native | gstreamer
+encoder: auto                   # auto | native | gstreamer (vpu is opt-in per-camera)
 
 cameras:
   - name: oakd
     enabled: true
     type: oakd
-    mode: mono                  # mono | stereo | stereo_rgb (mono only for now)
+    mode: mono                  # mono | stereo | stereo_rgb
     device_id: ""               # empty → first available; use list-cameras to pick
     camera_socket: RGB          # mono mode: which sensor
     width: 1280
@@ -33,6 +46,10 @@ cameras:
       port: 5000
       bitrate_mbps: 15
       # gop:                    # default: fps*5 (ULL tuning)
+      # encoder: vpu            # opt-in: on-device Myriad-X H.264
+      # vpu_profile: main       # baseline | main | high (vpu only)
+      # For stereo + vpu, also set ``port_right`` — each eye encodes
+      # on its own VideoEncoder node and ships on its own RTP port.
 
 display:
   mode: window                  # window | xr

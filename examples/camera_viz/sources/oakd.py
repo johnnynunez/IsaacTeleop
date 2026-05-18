@@ -13,11 +13,20 @@ two independent ``FrameSource``s. The pattern here:
     every stream the YAML asked for; ``release()`` on the last source
     closes it.
 
-Stereo defaults to GRAY8 over USB to halve bandwidth (OAK-D's stereo
-sensors are monochrome anyway); the GPU broadcasts it to RGBA. RGB
-streams come over as planar BGR888p; depthai's host-side
-``getCvFrame()`` packs them into HxWx3 BGR before we upload + GPU-swap
-to RGBA.
+Two output modes (mutually exclusive per device, set at ``build`` time):
+
+  * **Raw** (default): stereo defaults to GRAY8 over USB to halve
+    bandwidth (OAK-D's stereo sensors are monochrome anyway); the GPU
+    broadcasts it to RGBA. RGB streams come over as planar BGR888p;
+    depthai's host-side ``getCvFrame()`` packs them into HxWx3 BGR
+    before we upload + GPU-swap to RGBA. Frames carry the GPU buffer
+    via ``Frame.image``.
+  * **Encoded** (``encoded=True``): adds a ``dai.node.VideoEncoder`` per
+    stream feeding from NV12 camera output; the device emits H.264 NAL
+    units (Annex B) that we forward straight to the RTP sender. No host
+    GPU buffers, no NVENC. Frames carry the NAL bytes via
+    ``Frame.encoded_packet`` and leave ``image`` as None. Use this when
+    streaming over RTP from a Jetson where host PCIe + CPU are tight.
 
 Reconnect uses ``dai.Device.getAllAvailableDevices()`` as a pre-check
 before constructing ``dai.Device(...)`` — otherwise a missing device
@@ -29,8 +38,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Deque, List, Optional, Union
 
 import numpy as np
 
@@ -43,16 +53,37 @@ RECONNECT_DELAY_S = 5.0
 
 
 @dataclass
+class _EncoderParams:
+    """VPU H.264 encoder knobs (only used when ``_StreamSpec.encoded``).
+    The numbers mirror legacy ``OakdCameraOp``'s defaults — keyframe
+    cadence comes from the same fps*5 default the NVENC path uses, so
+    receivers see the same IDR rate either way."""
+
+    bitrate: int = 15_000_000
+    profile: str = "main"  # "baseline" | "main" | "high"
+    keyframe_frequency: int = 0  # 0 → fps * 5 at build time
+    quality: int = 80  # only used by VBR fallback; CBR ignores
+    num_b_frames: int = 0  # zero-latency tuning
+
+
+@dataclass
 class _StreamSpec:
     """Static config for one OAK-D stream. The frame_type drives both the
-    depthai pipeline node config and the GPU upload path."""
+    depthai pipeline node config and the GPU upload path.
+
+    ``encoded=True`` swaps the camera output to NV12, inserts a
+    ``dai.node.VideoEncoder`` between camera and queue, and the slot
+    publishes raw H.264 NAL bytes instead of an RGBA mailbox.
+    """
 
     name: str  # "left" | "right" | "rgb" | "mono"
     socket: str  # "LEFT" | "RIGHT" | "RGB"
     width: int
     height: int
     fps: int
-    frame_type: str  # "gray" | "bgr"
+    frame_type: str  # "gray" | "bgr" (raw mode); ignored when encoded
+    encoded: bool = False
+    encoder: Optional[_EncoderParams] = None
 
 
 @dataclass
@@ -112,6 +143,48 @@ class _StreamSlot:
         )
 
 
+@dataclass
+class _EncodedStreamSlot:
+    """Per-stream FIFO of pre-encoded H.264 NAL packets.
+
+    Unlike :class:`_StreamSlot`'s mailbox semantics, encoded NALs MUST
+    NOT be dropped — losing an IDR breaks decoding for the rest of the
+    GOP and the receiver freezes until the next keyframe. So we model
+    this as a bounded FIFO: producer ``push``es each pulled
+    ``EncodedFrame.getData()``; consumer ``latest()`` drains in arrival
+    order. The bound (32 frames ≈ 1s at 30fps) is generous enough to
+    absorb transient sender stalls without unbounded memory growth.
+    """
+
+    spec: _StreamSpec
+    packets: Deque[bytes]
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    queue: object = None  # depthai output queue (EncodedFrame)
+    dropped: int = 0  # cumulative count of overflow drops (oldest-first)
+
+    def push(self, data: bytes) -> None:
+        with self.lock:
+            if len(self.packets) == self.packets.maxlen:
+                self.dropped += 1
+            self.packets.append(data)
+
+    def latest(self) -> Optional[Frame]:
+        with self.lock:
+            if not self.packets:
+                return None
+            data = self.packets.popleft()
+        return Frame(
+            image=None,
+            timestamp_ns=time.monotonic_ns(),
+            source_id=self.spec.name,
+            stream=0,
+            encoded_packet=data,
+        )
+
+
+_AnySlot = Union[_StreamSlot, _EncodedStreamSlot]
+
+
 class _OakdDevice:
     """Owns one dai.Device + dai.Pipeline + one producer thread.
 
@@ -141,7 +214,7 @@ class _OakdDevice:
 
         self._device_id = device_id
         self._stream_specs = streams
-        self._slots: dict[str, _StreamSlot] = {}
+        self._slots: dict[str, _AnySlot] = {}
         self._lock = threading.Lock()  # protects refcount + lifecycle
         self._refcount = 0
         self._thread: Optional[threading.Thread] = None
@@ -161,6 +234,14 @@ class _OakdDevice:
         import cupy as cp
 
         for s in self._stream_specs:
+            if s.encoded:
+                # Encoded streams need no GPU buffers — the device emits
+                # H.264 NALs that we ship verbatim. FIFO of ~1s at 30fps.
+                self._slots[s.name] = _EncodedStreamSlot(
+                    spec=s,
+                    packets=deque(maxlen=32),
+                )
+                continue
             if s.frame_type == "gray":
                 staging = alloc_pinned_host((s.height, s.width), np.uint8)
                 landing = cp.empty((s.height, s.width), dtype=cp.uint8)
@@ -267,14 +348,64 @@ class _OakdDevice:
         else:
             notify("oakd", f"USB {speed_name}")
 
+        profile_enum = {
+            "baseline": dai.VideoEncoderProperties.Profile.H264_BASELINE,
+            "main": dai.VideoEncoderProperties.Profile.H264_MAIN,
+            "high": dai.VideoEncoderProperties.Profile.H264_HIGH,
+        }
+
         pipeline = dai.Pipeline(device)
         for s in self._stream_specs:
             socket_key = self._SOCKET_MAP[s.socket.upper()]
             cam = pipeline.create(dai.node.Camera).build(socket_enum[socket_key])
-            out = cam.requestOutput(
-                (s.width, s.height), type=frame_type_enum[s.frame_type], fps=s.fps
-            )
-            self._slots[s.name].queue = out.createOutputQueue(maxSize=4, blocking=False)
+            if s.encoded:
+                # VPU encoder wants NV12. Camera node delivers it directly
+                # from the ISP, so no host pack / GPU convert in the path.
+                raw_out = cam.requestOutput(
+                    (s.width, s.height), type=dai.ImgFrame.Type.NV12, fps=s.fps
+                )
+                params = s.encoder or _EncoderParams()
+                if params.profile not in profile_enum:
+                    raise ValueError(
+                        f"OAK-D encoder profile {params.profile!r} unknown "
+                        f"(expected one of {sorted(profile_enum)})"
+                    )
+                encoder = pipeline.create(dai.node.VideoEncoder).build(
+                    raw_out,
+                    frameRate=s.fps,
+                    profile=profile_enum[params.profile],
+                    bitrate=params.bitrate,
+                    quality=params.quality,
+                )
+                # ULL tuning to match the NVENC path: CBR, no B-frames,
+                # IDR every fps*5 frames (5s) unless overridden.
+                gop = params.keyframe_frequency or (s.fps * 5)
+                try:
+                    encoder.setNumFramesPool(3)
+                    encoder.setRateControlMode(
+                        dai.VideoEncoderProperties.RateControlMode.CBR
+                    )
+                    encoder.setKeyframeFrequency(gop)
+                    encoder.setNumBFrames(params.num_b_frames)
+                except Exception as e:
+                    # Some encoder knobs aren't available on older depthai
+                    # builds; the defaults are sane enough that we log
+                    # and continue rather than fail the whole device.
+                    logger.warning(
+                        "oakd %s: some VideoEncoder knobs unavailable (%s)",
+                        s.name,
+                        e,
+                    )
+                self._slots[s.name].queue = encoder.out.createOutputQueue(
+                    maxSize=4, blocking=False
+                )
+            else:
+                out = cam.requestOutput(
+                    (s.width, s.height), type=frame_type_enum[s.frame_type], fps=s.fps
+                )
+                self._slots[s.name].queue = out.createOutputQueue(
+                    maxSize=4, blocking=False
+                )
         pipeline.start()
         self._device = device
         self._pipeline = pipeline
@@ -295,6 +426,13 @@ class _OakdDevice:
             self._device = None
         for slot in self._slots.values():
             slot.queue = None
+            # Drain any queued encoded NALs from before disconnect. The
+            # next session emits a fresh stream (new SPS/PPS at the first
+            # IDR), so stale packets would just look like a discontinuity
+            # the receiver has to throw away anyway.
+            if isinstance(slot, _EncodedStreamSlot):
+                with slot.lock:
+                    slot.packets.clear()
         self._connected = False
 
     # ── Producer loop ─────────────────────────────────────────────────
@@ -306,9 +444,15 @@ class _OakdDevice:
         # Pin to the GPU our slot buffers + per-slot CUDA streams were
         # allocated on at __init__ time. On multi-GPU hosts VizSession may
         # have picked a non-default Vulkan adapter and this producer thread
-        # otherwise defaults to GPU 0.
-        first_slot = next(iter(self._slots.values()))
-        device_id = int(first_slot.gpu_buffers[0].device.id)
+        # otherwise defaults to GPU 0. Encoded-only devices have no GPU
+        # buffers to pin against — skip the device guard entirely there.
+        raw_slot = next(
+            (s for s in self._slots.values() if isinstance(s, _StreamSlot)), None
+        )
+        if raw_slot is None:
+            self._produce_loop_inner(dai)
+            return
+        device_id = int(raw_slot.gpu_buffers[0].device.id)
         with cp.cuda.Device(device_id):
             self._produce_loop_inner(dai)
 
@@ -342,7 +486,18 @@ class _OakdDevice:
                     self._close_device()
                     self._reconnect_count += 1
                     continue
-                notify("oakd", "connected")
+                # Brief tag of what we're actually shipping. Encoded
+                # streams show up as ``vpu N.NMbps`` so a glance at the
+                # log answers "host or device encode?".
+                encoded_specs = [s for s in self._stream_specs if s.encoded]
+                if encoded_specs:
+                    mbps = (encoded_specs[0].encoder or _EncoderParams()).bitrate / 1e6
+                    notify(
+                        "oakd",
+                        f"connected (vpu {mbps:.1f}Mbps × {len(encoded_specs)})",
+                    )
+                else:
+                    notify("oakd", "connected")
                 first_frame_seen = False
                 opening_notified = False
                 unavailable_notified = False
@@ -363,6 +518,19 @@ class _OakdDevice:
                     if queue is None or not queue.has():
                         continue
                     msg = queue.get()
+                    if stream_spec.encoded:
+                        if not isinstance(msg, dai.EncodedFrame):
+                            continue
+                        data = msg.getData()
+                        if data is None or len(data) == 0:
+                            continue
+                        # depthai returns a numpy-array view into the SDK
+                        # buffer; copy into bytes so the slot's FIFO owns
+                        # the memory after the next processTasks() runs.
+                        slot.push(bytes(data))
+                        self._frame_counts[stream_spec.name] += 1
+                        emitted_any = True
+                        continue
                     if not isinstance(msg, dai.ImgFrame):
                         continue
                     if stream_spec.frame_type == "gray":
@@ -495,16 +663,33 @@ class OakdSource(FrameSource):
         rgb_width: int = 0,
         rgb_height: int = 0,
         rgb_fps: int = 0,
+        encoded: bool = False,
+        encoder_params: Optional[_EncoderParams] = None,
     ) -> List["OakdSource"]:
+        """Configure one OAK-D device for the requested mode and return a
+        per-stream handle list. ``encoded=True`` swaps the per-stream
+        camera output for on-device VPU H.264 (NV12 → VideoEncoder) and
+        skips host GPU buffers entirely — handles emit Frames with
+        ``encoded_packet`` set instead of ``image``.
+        """
         streams = _streams_for_mode(
             mode, width, height, fps, camera_socket, rgb_width, rgb_height, rgb_fps
         )
+        if encoded:
+            params = encoder_params or _EncoderParams()
+            for s in streams:
+                s.encoded = True
+                s.encoder = params
+        # ``pixel_format`` advertises what consumers will receive: rgba8
+        # for raw, "h264" for encoded (the RTP sender keys off the frame
+        # itself, but the spec stays honest about what's on the wire).
+        pixel_format = "h264" if encoded else "rgba8"
         device = _OakdDevice(device_id, streams)
         return [
             cls(
                 device,
                 s.name,
-                SourceSpec(f"{base_name}_{s.name}", s.width, s.height, "rgba8"),
+                SourceSpec(f"{base_name}_{s.name}", s.width, s.height, pixel_format),
             )
             for s in streams
         ]

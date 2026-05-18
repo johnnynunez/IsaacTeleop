@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# ZED + OAK-D side-by-side in XR. Each is mono (left eye / RGB socket).
-# Default layout: two 1.0 m × 0.5625 m planes at 1.5 m, lazy-locked
-# facing the user. ZED on the left (offset_x = -0.55), OAK-D on the
-# right (+0.55) — center-to-center ~1.1 m gives ~10 cm of breathing
-# room between them and keeps both inside a typical 100° XR FOV.
+# ZED + OAK-D side-by-side in XR. Both are configured mono here (ZED
+# left eye / OAK-D RGB socket) to keep the layout readable; flip either
+# to ``stereo: true`` for true per-eye stereo on its plane. Default
+# layout: two 1.0 m × 0.5625 m planes at 1.5 m, lazy-locked facing the
+# user. ZED on the left (offset_x = -0.55), OAK-D on the right (+0.55)
+# — center-to-center ~1.1 m gives ~10 cm of breathing room between them
+# and keeps both inside a typical 100° XR FOV.
 #
 # To go RTP: set ``source: rtp``, edit ``streaming.host`` to the
 # workstation IP, and run camera_viz.sh deploy CONFIG on the robot.

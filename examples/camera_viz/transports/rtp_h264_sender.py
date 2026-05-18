@@ -17,6 +17,11 @@ codec. Pipeline:
   routers don't fragment (fragmentation is a latency killer over WiFi).
 * ``udpsink sync=false async=false`` skips clock sync — we want to push
   packets out as soon as NVENC produces them; no pacing.
+
+Two source flavors:
+  * Raw frames → ``encoder.encode(frame.image)`` produces NAL bytes.
+  * Pre-encoded frames (``encoder=None``, ``frame.encoded_packet`` set)
+    → push the NAL through unchanged. This is the OAK-D VPU path.
 """
 
 from __future__ import annotations
@@ -229,32 +234,38 @@ class RtpH264Sender:
                 self._stop.wait(timeout=idle_poll_s)
                 continue
 
-            # First-frame device pin: capture whichever GPU the source's
-            # buffers live on (set by VizSession's Vulkan adapter choice)
-            # and lock this thread to that device for the rest of the run.
-            if not device_pinned:
-                cp.cuda.runtime.setDevice(int(frame.image.device.id))
-                device_pinned = True
+            # VPU path: source already emitted a NAL packet; push it
+            # through h264parse / rtph264pay unchanged. No encoder calls,
+            # no GPU pin (frame.image is None).
+            if frame.encoded_packet is not None:
+                packets = [frame.encoded_packet]
+            else:
+                # First-frame device pin: capture whichever GPU the source's
+                # buffers live on (set by VizSession's Vulkan adapter choice)
+                # and lock this thread to that device for the rest of the run.
+                if not device_pinned:
+                    cp.cuda.runtime.setDevice(int(frame.image.device.id))
+                    device_pinned = True
 
-            try:
-                packets = self._encoder.encode(frame.image)
-                consecutive_encode_failures = 0
-            except Exception as e:
-                consecutive_encode_failures += 1
-                logger.warning(
-                    "RtpH264Sender: encode failed (%s); resetting encoder (%d/%d)",
-                    e,
-                    consecutive_encode_failures,
-                    self._ENCODE_FAIL_THRESHOLD,
-                )
-                self._encoder.reset()
-                # Persistent failures = wedged NVENC; let the supervisor restart.
-                if consecutive_encode_failures >= self._ENCODE_FAIL_THRESHOLD:
-                    raise RuntimeError(
-                        f"RtpH264Sender: encode failed {consecutive_encode_failures} "
-                        f"times in a row; surfacing to supervisor for full restart"
+                try:
+                    packets = self._encoder.encode(frame.image)
+                    consecutive_encode_failures = 0
+                except Exception as e:
+                    consecutive_encode_failures += 1
+                    logger.warning(
+                        "RtpH264Sender: encode failed (%s); resetting encoder (%d/%d)",
+                        e,
+                        consecutive_encode_failures,
+                        self._ENCODE_FAIL_THRESHOLD,
                     )
-                continue
+                    self._encoder.reset()
+                    # Persistent failures = wedged NVENC; let the supervisor restart.
+                    if consecutive_encode_failures >= self._ENCODE_FAIL_THRESHOLD:
+                        raise RuntimeError(
+                            f"RtpH264Sender: encode failed {consecutive_encode_failures} "
+                            f"times in a row; surfacing to supervisor for full restart"
+                        )
+                    continue
 
             for pkt in packets:
                 if not self._push_packet(pkt):

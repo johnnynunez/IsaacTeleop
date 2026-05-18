@@ -113,7 +113,21 @@ class CameraSupervisor:
             self._thread = None
 
     def _build_senders(self) -> List[RtpH264Sender]:
-        sources = build_local_camera(self._cfg)
+        rtp = self._cfg.get("rtp", {})
+        encoder_backend = str(rtp.get("encoder", self._default_encoder)).lower()
+        # VPU is opt-in only (``auto`` never resolves to it). When set,
+        # the OAK-D source itself does the H.264 encode on the Myriad-X
+        # — build_local_camera threads bitrate/gop/profile from rtp
+        # into the device pipeline. Reject vpu on non-OAK-D up front
+        # rather than letting build_local_camera produce a confusing error.
+        encoded = encoder_backend == "vpu"
+        if encoded and self._cfg.get("type") != "oakd":
+            raise ValueError(
+                f"camera {self._name!r}: encoder=vpu is only supported on "
+                f"type: oakd (got type: {self._cfg.get('type')!r})"
+            )
+
+        sources = build_local_camera(self._cfg, encoded=encoded)
         # stereo_rgb's third stream is processed by depthai but never wired.
         if self._cfg.get("type") == "oakd" and self._cfg.get("mode") == "stereo_rgb":
             logger.warning(
@@ -125,7 +139,6 @@ class CameraSupervisor:
         eyes = _eye_sources(
             sources, self._name, expect_stereo=bool(self._cfg.get("stereo", False))
         )
-        rtp = self._cfg.get("rtp", {})
         if "port" not in rtp:
             raise ValueError(f"camera {self._name!r} missing rtp.port")
         is_stereo = len(eyes) == 2
@@ -136,8 +149,11 @@ class CameraSupervisor:
             )
 
         def build_one(source: FrameSource, port: int) -> RtpH264Sender:
+            # VPU path: encoder is None — RtpH264Sender keys off
+            # Frame.encoded_packet (set by OakdSource in encoded mode)
+            # and pushes the NAL straight to h264parse / rtph264pay.
             encoder = make_encoder(
-                rtp.get("encoder", self._default_encoder),
+                encoder_backend,
                 width=int(self._cfg["width"]),
                 height=int(self._cfg["height"]),
                 bitrate=int(rtp.get("bitrate_mbps", 15)) * 1_000_000,

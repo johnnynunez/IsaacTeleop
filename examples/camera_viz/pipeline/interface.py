@@ -30,14 +30,19 @@ class SourceSpec:
 
 @dataclass
 class Frame:
-    """One produced frame, GPU-resident.
+    """One produced frame.
 
-    ``image`` is anything that exposes ``__cuda_array_interface__`` —
-    CuPy / PyTorch / Numba arrays all work. ``stream`` is the producer's
-    CUDA stream so the consumer can synchronize when it's not 0/default.
+    Two flavors, mutually exclusive:
 
-    Stereo: ``image`` is the left eye; ``image_right`` carries the
-    right eye when paired (both from the same capture instant).
+      * Raw (the common case): ``image`` exposes ``__cuda_array_interface__``
+        — CuPy / PyTorch / Numba arrays all work. ``stream`` is the
+        producer's CUDA stream so the consumer can synchronize when it's
+        not 0/default. Stereo: ``image`` is the left eye; ``image_right``
+        carries the right eye when paired (same capture instant).
+      * Encoded: ``encoded_packet`` is a contiguous H.264 NAL byte buffer
+        (Annex B) from a hardware encoder. ``image`` is None. Used by
+        OAK-D's on-device VPU encoder path; the RTP sender pushes the
+        packet straight through without re-encoding.
     """
 
     image: Any
@@ -45,6 +50,7 @@ class Frame:
     source_id: str
     stream: int = 0
     image_right: Optional[Any] = None
+    encoded_packet: Optional[bytes] = None
 
 
 class FrameSource(ABC):
