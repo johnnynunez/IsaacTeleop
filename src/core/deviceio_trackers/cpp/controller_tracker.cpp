@@ -20,11 +20,8 @@ const ControllerSnapshotTrackedT& ControllerTracker::get_right_controller(const 
     return static_cast<const IControllerTrackerImpl&>(session.get_tracker_impl(*this)).get_right_controller();
 }
 
-void ControllerTracker::apply_haptic_feedback(const ITrackerSession& session,
-                                              bool is_left,
-                                              float amplitude,
-                                              float frequency_hz,
-                                              float duration_s) const
+void ControllerTracker::apply_haptic_feedback(
+    const ITrackerSession& session, bool is_left, float amplitude, float frequency_hz, float duration_s) const
 {
     static_cast<const IControllerTrackerImpl&>(session.get_tracker_impl(*this))
         .apply_haptic_feedback(is_left, amplitude, frequency_hz, duration_s);

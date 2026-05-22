@@ -159,9 +159,8 @@ void ManusTracker::apply_haptic_command(bool is_left, const std::array<float, 5>
         bool expected = false;
         if (m_haptic_error_logged[slot].compare_exchange_strong(expected, true))
         {
-            std::cerr << "[Manus] CoreSdk_VibrateFingersForGlove failed for "
-                      << (is_left ? "left" : "right") << " glove (id=" << glove_id
-                      << ", code=" << static_cast<int>(rc)
+            std::cerr << "[Manus] CoreSdk_VibrateFingersForGlove failed for " << (is_left ? "left" : "right")
+                      << " glove (id=" << glove_id << ", code=" << static_cast<int>(rc)
                       << "); further errors for this side will be silenced." << std::endl;
         }
     }

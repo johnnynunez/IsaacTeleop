@@ -460,10 +460,7 @@ const ControllerSnapshotTrackedT& LiveControllerTrackerImpl::get_right_controlle
     return right_tracked_;
 }
 
-void LiveControllerTrackerImpl::apply_haptic_feedback(bool is_left,
-                                                     float amplitude,
-                                                     float frequency_hz,
-                                                     float duration_s) const
+void LiveControllerTrackerImpl::apply_haptic_feedback(bool is_left, float amplitude, float frequency_hz, float duration_s) const
 {
     // The haptic action was created against both subaction paths during init,
     // so targeting one side is a matter of choosing the matching path here.
@@ -505,8 +502,8 @@ void LiveControllerTrackerImpl::apply_haptic_feedback(bool is_left,
             bool expected = false;
             if (stop_haptic_error_logged_[slot].compare_exchange_strong(expected, true))
             {
-                std::cerr << "[ControllerTracker] xrStopHapticFeedback(" << side_name << ") failed: "
-                          << static_cast<int>(stop_result)
+                std::cerr << "[ControllerTracker] xrStopHapticFeedback(" << side_name
+                          << ") failed: " << static_cast<int>(stop_result)
                           << "; further errors for this side will be silenced." << std::endl;
             }
         }
@@ -531,22 +528,21 @@ void LiveControllerTrackerImpl::apply_haptic_feedback(bool is_left,
     // generous upper bound that stays well below INT64_MAX ~= 9.22e18).
     constexpr double k_max_duration_ns = 1.0e18;
     vibration.duration =
-        (safe_duration_s <= 0.0f)
-            ? XR_MIN_HAPTIC_DURATION
-            : static_cast<XrDuration>(
-                  std::clamp(static_cast<double>(safe_duration_s) * 1.0e9, 0.0, k_max_duration_ns));
+        (safe_duration_s <= 0.0f) ?
+            XR_MIN_HAPTIC_DURATION :
+            static_cast<XrDuration>(std::clamp(static_cast<double>(safe_duration_s) * 1.0e9, 0.0, k_max_duration_ns));
     // frequency_hz == 0 -> let the runtime pick.
     vibration.frequency = (safe_frequency_hz <= 0.0f) ? XR_FREQUENCY_UNSPECIFIED : safe_frequency_hz;
 
-    const XrResult apply_result = core_funcs_.xrApplyHapticFeedback(
-        session_, &info, reinterpret_cast<const XrHapticBaseHeader*>(&vibration));
+    const XrResult apply_result =
+        core_funcs_.xrApplyHapticFeedback(session_, &info, reinterpret_cast<const XrHapticBaseHeader*>(&vibration));
     if (XR_FAILED(apply_result))
     {
         bool expected = false;
         if (apply_haptic_error_logged_[slot].compare_exchange_strong(expected, true))
         {
-            std::cerr << "[ControllerTracker] xrApplyHapticFeedback(" << side_name << ") failed: "
-                      << static_cast<int>(apply_result)
+            std::cerr << "[ControllerTracker] xrApplyHapticFeedback(" << side_name
+                      << ") failed: " << static_cast<int>(apply_result)
                       << "; further errors for this side will be silenced." << std::endl;
         }
     }

@@ -109,10 +109,10 @@ struct OpenXRCoreFunctions
 
         // Haptic output (optional — tracker haptic methods check for null pointers
         // and silently no-op when the runtime does not advertise them).
-        getProcAddr(instance, "xrApplyHapticFeedback",
-                    reinterpret_cast<PFN_xrVoidFunction*>(&results.xrApplyHapticFeedback));
-        getProcAddr(instance, "xrStopHapticFeedback",
-                    reinterpret_cast<PFN_xrVoidFunction*>(&results.xrStopHapticFeedback));
+        getProcAddr(
+            instance, "xrApplyHapticFeedback", reinterpret_cast<PFN_xrVoidFunction*>(&results.xrApplyHapticFeedback));
+        getProcAddr(
+            instance, "xrStopHapticFeedback", reinterpret_cast<PFN_xrVoidFunction*>(&results.xrStopHapticFeedback));
 
         return results;
     }

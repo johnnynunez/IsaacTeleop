@@ -10,7 +10,6 @@
 // repo's vendor-SDK boundary in AGENTS.md.
 
 #include <core/manus_hand_tracking_plugin.hpp>
-
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 
@@ -74,8 +73,7 @@ PYBIND11_MODULE(_manus_haptic, m)
             // call simply no-ops until a glove is detected.
             plugins::manus::ManusTracker::instance().apply_haptic_command(is_left, powers_arr);
         },
-        py::arg("side"),
-        py::arg("powers"),
+        py::arg("side"), py::arg("powers"),
         "Vibrate the five finger motors of the glove on the given side.\n"
         "side: 'left' or 'right'. powers: (5,) float32 in [0, 1], order Thumb/Index/Middle/Ring/Pinky.");
 
@@ -86,6 +84,5 @@ PYBIND11_MODULE(_manus_haptic, m)
             const bool is_left = side_string_to_is_left(side);
             return plugins::manus::ManusTracker::instance().supports_haptics(is_left);
         },
-        py::arg("side"),
-        "Whether the glove on the given side is connected and reports haptic support.");
+        py::arg("side"), "Whether the glove on the given side is connected and reports haptic support.");
 }

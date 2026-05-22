@@ -39,11 +39,8 @@ public:
     /// shortest supported pulse. See the base interface
     /// (:class:`IControllerTrackerImpl::apply_haptic_feedback`) for the full
     /// contract.
-    void apply_haptic_feedback(const ITrackerSession& session,
-                               bool is_left,
-                               float amplitude,
-                               float frequency_hz,
-                               float duration_s) const;
+    void apply_haptic_feedback(
+        const ITrackerSession& session, bool is_left, float amplitude, float frequency_hz, float duration_s) const;
 
 private:
     static constexpr const char* TRACKER_NAME = "ControllerTracker";
