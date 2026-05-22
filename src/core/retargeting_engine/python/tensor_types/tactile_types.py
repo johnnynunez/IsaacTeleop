@@ -1,22 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-TensorGroupType definitions for tactile feedback and haptic output.
+"""TensorGroupType definitions for tactile feedback and haptic output.
 
-Sim-side schemas (TactileVector, TactileHeatmap) carry contact / pressure data
-from simulators (e.g. Isaac Lab's ContactSensor) into the retargeting pipeline.
-Device-side schemas (FingerPowerVector, ControllerHapticPulse, EndEffectorForce)
-describe what a haptic device adapter will accept.
-
-Retargeters map sim-side -> device-side schemas; vendor adapters implementing
-``isaacteleop.haptic_devices.IHapticDevice`` declare which device-side schema
-they accept via ``accepted_type()`` and the ``HapticSink`` retargeter uses that
-for connect-time type checking.
-
-The existing :func:`TransformMatrix` factory in ``standard_types`` is reused
-unchanged for the optional ``world_T_haptic`` frame leaf -- no new transform
-schema is introduced here.
+Sim-side schemas (``TactileVector``, ``TactileHeatmap``) carry contact data
+into the retargeting pipeline; device-side schemas (``FingerPowerVector``,
+``ControllerHapticPulse``, ``EndEffectorForce``) describe what each
+``IHapticDevice`` adapter accepts. Retargeters in
+:mod:`isaacteleop.retargeters.tactile_retargeters` map sim-side to
+device-side; ``HapticSink`` uses ``accepted_type()`` for connect-time type
+checking.
 """
 
 from ..interface.tensor_group_type import TensorGroupType
@@ -45,15 +38,10 @@ NUM_END_EFFECTOR_FORCE_AXES = 3
 def TactileVector(num_taxels: int) -> TensorGroupType:
     """Per-taxel scalar magnitudes (or N-element vector) [N, depending on use].
 
-    Generic sim-side schema for tactile / contact data. The same type covers:
-
-    * a single contact force magnitude (``num_taxels == 1``),
-    * a row of taxels on a finger pad (``num_taxels == N``),
-    * a 3-vector force or 3-vector position (``num_taxels == 3``) used by the
-      composable spatial primitives (e.g. :class:`Vector3FrameTransform`).
-
-    The semantic meaning of each entry is set by the retargeter consuming
-    this group; this schema only fixes shape and dtype.
+    Generic sim-side schema covering single contact magnitudes
+    (``num_taxels == 1``), per-pad taxel rows, and 3-vector forces /
+    positions used by the composable spatial primitives. The schema fixes
+    shape and dtype; the consuming retargeter fixes semantics.
 
     Args:
         num_taxels: Number of scalar entries.

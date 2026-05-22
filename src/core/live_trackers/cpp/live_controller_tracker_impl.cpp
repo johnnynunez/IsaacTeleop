@@ -462,22 +462,14 @@ const ControllerSnapshotTrackedT& LiveControllerTrackerImpl::get_right_controlle
 
 void LiveControllerTrackerImpl::apply_haptic_feedback(bool is_left, float amplitude, float frequency_hz, float duration_s) const
 {
-    // The haptic action was created against both subaction paths during init,
-    // so targeting one side is a matter of choosing the matching path here.
     const XrPath subaction_path = is_left ? left_hand_path_ : right_hand_path_;
     const size_t slot = is_left ? 0 : 1;
     const char* const side_name = is_left ? "left" : "right";
 
-    // Sanitize non-finite inputs (NaN / +-Inf) up front:
-    //   * std::clamp does not sanitize NaN (NaN-vs-bound comparisons are
-    //     unordered, so NaN passes through unchanged);
-    //   * `nan <= 0.0f` is false, so NaN amplitude / duration would skip the
-    //     "explicit stop" / "runtime default" branches below; and
-    //   * static_cast<XrDuration>(NaN or out-of-range Inf) is undefined
-    //     behaviour per [conv.fpint] (XrDuration is int64).
-    // Mapping non-finite to zero routes them through the existing zero-handling
-    // paths (amplitude=0 -> stop, duration_s=0 -> XR_MIN_HAPTIC_DURATION,
-    // frequency_hz=0 -> XR_FREQUENCY_UNSPECIFIED).
+    // Map non-finite inputs (NaN / +-Inf) to zero so they hit the explicit-stop
+    // / runtime-default branches below. Without this, std::clamp leaves NaN
+    // unchanged (unordered comparisons) and static_cast<XrDuration>(NaN/Inf)
+    // is UB per [conv.fpint] (XrDuration is int64).
     const float safe_amplitude = std::isfinite(amplitude) ? amplitude : 0.0f;
     const float safe_duration_s = std::isfinite(duration_s) ? duration_s : 0.0f;
     const float safe_frequency_hz = std::isfinite(frequency_hz) ? frequency_hz : 0.0f;
@@ -486,8 +478,8 @@ void LiveControllerTrackerImpl::apply_haptic_feedback(bool is_left, float amplit
     info.action = haptic_action_;
     info.subactionPath = subaction_path;
 
-    // amplitude==0 maps to an explicit stop instead of a zero-amplitude pulse,
-    // so dropping below the upstream deadband cleanly aborts an in-flight rumble.
+    // amplitude==0 issues an explicit stop so an in-flight rumble aborts when
+    // the upstream deadband closes.
     if (safe_amplitude <= 0.0f)
     {
         if (core_funcs_.xrStopHapticFeedback == nullptr)
@@ -497,8 +489,6 @@ void LiveControllerTrackerImpl::apply_haptic_feedback(bool is_left, float amplit
         const XrResult stop_result = core_funcs_.xrStopHapticFeedback(session_, &info);
         if (XR_FAILED(stop_result))
         {
-            // Don't tear the session down on transient failures, but log the
-            // first occurrence per side so chronic problems are not invisible.
             bool expected = false;
             if (stop_haptic_error_logged_[slot].compare_exchange_strong(expected, true))
             {
@@ -512,26 +502,19 @@ void LiveControllerTrackerImpl::apply_haptic_feedback(bool is_left, float amplit
 
     if (core_funcs_.xrApplyHapticFeedback == nullptr)
     {
-        // Runtime does not advertise the haptic entry point — silently no-op.
-        // This keeps haptic feedback a nice-to-have rather than a session-fatal
-        // dependency for runtimes that omit it (e.g. some headless test rigs).
+        // Runtime does not advertise the entry point — silently no-op.
         return;
     }
 
     XrHapticVibration vibration{ XR_TYPE_HAPTIC_VIBRATION };
     vibration.amplitude = std::clamp(safe_amplitude, 0.0f, 1.0f);
-    // duration_s == 0 -> shortest pulse the runtime supports. Use double for
-    // the seconds->nanoseconds conversion: float has ~7 decimal digits and
-    // can lose tens of microseconds for multi-second pulses. Clamp the
-    // converted nanoseconds to a safe range that round-trips to int64 without
-    // overflow (real haptic pulses are sub-second, so 1e18 ns ~= 31 years is a
-    // generous upper bound that stays well below INT64_MAX ~= 9.22e18).
+    // 1e18 ns (~31 years) caps the converted duration well below INT64_MAX so
+    // the cast cannot overflow on absurdly large finite inputs.
     constexpr double k_max_duration_ns = 1.0e18;
     vibration.duration =
         (safe_duration_s <= 0.0f) ?
             XR_MIN_HAPTIC_DURATION :
             static_cast<XrDuration>(std::clamp(static_cast<double>(safe_duration_s) * 1.0e9, 0.0, k_max_duration_ns));
-    // frequency_hz == 0 -> let the runtime pick.
     vibration.frequency = (safe_frequency_hz <= 0.0f) ? XR_FREQUENCY_UNSPECIFIED : safe_frequency_hz;
 
     const XrResult apply_result =

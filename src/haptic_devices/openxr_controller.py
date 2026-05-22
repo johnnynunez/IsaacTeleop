@@ -3,24 +3,17 @@
 
 """OpenXR motion-controller haptic adapter (Quest, Vive, Index, Pico, ...).
 
-Unlike vendor-SDK gloves, OpenXR motion-controller haptics ride the standard
-OpenXR action system the live trackers layer is already built around. The
-integration is therefore a *tracker extension*, not a new plugin -- the
-``LiveControllerTrackerImpl`` gains a haptic action and an
-``apply_haptic_feedback`` method, and the public
-:class:`~isaacteleop.deviceio_trackers.ControllerTracker` gains a matching
-delegating method that takes a session.
-
-To talk through the active :class:`~isaacteleop.deviceio.DeviceIOSession`,
-this module ships a pair following the existing
-:class:`~isaacteleop.retargeting_engine.deviceio_source_nodes.MessageChannelSink`
-pattern: :class:`OpenXRControllerHapticDevice` enqueues frames during
-``HapticSink._compute_fn`` (no session in scope there), and
+Ships a sink/source pair following the ``MessageChannelSink`` pattern:
+:class:`OpenXRControllerHapticDevice` queues per-frame pulses from inside
+``HapticSink._compute_fn`` (no session in scope), and
 :class:`OpenXRControllerHapticSource` drains the queue inside
-``poll_tracker(session)`` (where TeleopSession provides the session).
+``poll_tracker(session)`` so the call goes through the active
+``DeviceIOSession``. Routes through the existing
+``LiveControllerTrackerImpl::apply_haptic_feedback`` rather than a new plugin
+because OpenXR is already the abstraction the live-tracker layer is built on.
 
-The user wires both into the pipeline via
-:func:`isaaclab_teleop.tactile_helpers.build_default_openxr_controller_pipeline`.
+The :func:`~isaaclab_teleop.tactile_helpers.build_default_openxr_controller_pipeline`
+helper wires both into a pipeline.
 """
 
 from __future__ import annotations
@@ -58,48 +51,27 @@ _PendingPulse = tuple[float, float, float]
 class OpenXRControllerHapticDevice(IHapticDevice):
     """:class:`IHapticDevice` adapter for OpenXR motion-controller haptics.
 
-    Consumes :func:`ControllerHapticPulse <isaacteleop.retargeting_engine.tensor_types.ControllerHapticPulse>`
-    (one ``(3,) float32`` per side: ``[amplitude, frequency_hz, duration_s]``).
-    ``frequency_hz == 0`` selects ``XR_FREQUENCY_UNSPECIFIED``; ``duration_s == 0``
-    selects ``XR_MIN_HAPTIC_DURATION``; ``amplitude == 0`` triggers
-    ``xrStopHapticFeedback`` on the C++ side.
+    Consumes ``ControllerHapticPulse`` (``[amplitude, frequency_hz,
+    duration_s]``). ``frequency_hz == 0`` selects ``XR_FREQUENCY_UNSPECIFIED``;
+    ``duration_s == 0`` selects ``XR_MIN_HAPTIC_DURATION``; ``amplitude == 0``
+    triggers ``xrStopHapticFeedback``. :meth:`apply` queues the pulse instead
+    of calling OpenXR directly because the active session is only in scope
+    inside :class:`OpenXRControllerHapticSource.poll_tracker`, which drains
+    the queue once per frame.
 
-    ``apply()`` does not call OpenXR directly because the active session is
-    not in scope inside ``HapticSink._compute_fn`` (it lives on
-    :class:`~isaacteleop.teleop_session_manager.TeleopSession`, not on
-    individual retargeters). Instead it queues the latest pulse per side and
-    relies on the paired :class:`OpenXRControllerHapticSource` to drain the
-    queue inside ``poll_tracker(session)`` once per frame -- the same split
-    :class:`~isaacteleop.retargeting_engine.deviceio_source_nodes.MessageChannelSink`
-    uses for outbound message-channel traffic.
-
-    .. note::
-        **One-frame haptic latency.** The :class:`OpenXRControllerHapticSource`
-        drains the queue at the *start* of each step (in ``poll_tracker``,
-        before the retargeting graph runs), while :meth:`apply` enqueues a
-        pulse from inside the graph. So a pulse produced in step *N* is sent
-        to the controller in step *N+1*'s pre-graph drain. At 60–90 Hz the
-        ~11–17 ms delay is below the perception threshold for vibration; for
-        higher-rate force-feedback paths (e.g. the planned Haply integration)
-        this ordering deserves a redesign.
+    Note: the source drains *before* the retargeting graph runs, so a pulse
+    produced in step *N* reaches the controller during step *N+1*'s pre-graph
+    drain. ~11–17 ms at 60–90 Hz is below the perception threshold for
+    vibration; force-feedback paths will want a different ordering.
     """
 
     def __init__(
         self,
         sides: Iterable[Literal["left", "right"]] = ("left", "right"),
     ) -> None:
-        """Construct an OpenXR motion-controller haptic adapter.
-
-        Args:
-            sides: Which sides to drive. Most motion controllers are paired
-                (default ``("left", "right")``), but some single-handed
-                controllers exist; restrict here to make
-                :meth:`supports` return ``False`` for the unused side.
-        """
         self._sides = set(sides)
-        # Only the most recent pulse per side per frame matters: an
-        # xrApplyHapticFeedback() call already supersedes any in-flight pulse
-        # on the same action, so coalescing here is correct, not lossy.
+        # Latest-wins per side: xrApplyHapticFeedback already supersedes any
+        # in-flight pulse on the same action, so coalescing is non-lossy.
         self._pending: dict[Literal["left", "right"], _PendingPulse] = {}
 
     def accepted_type(self) -> TensorGroupType:
@@ -119,48 +91,33 @@ class OpenXRControllerHapticDevice(IHapticDevice):
         self._pending[side] = (float(arr[0]), float(arr[1]), float(arr[2]))
 
     def drain_pending(self) -> dict[Literal["left", "right"], _PendingPulse]:
-        """Return and clear the per-side pending pulses.
-
-        Called once per frame by the paired
-        :class:`OpenXRControllerHapticSource` from inside ``poll_tracker``.
-        """
+        """Return and clear the per-side pending pulses; called once per frame
+        by :class:`OpenXRControllerHapticSource.poll_tracker`."""
         pending, self._pending = self._pending, {}
         return pending
 
 
 class OpenXRControllerHapticSource(IDeviceIOSource):
-    """Drains :class:`OpenXRControllerHapticDevice`'s queue through an active session.
+    """Session-aware drain for :class:`OpenXRControllerHapticDevice`.
 
-    This is the session-aware half of the OpenXR-controller haptic plumbing.
-    It is an :class:`IDeviceIOSource` so :class:`~isaacteleop.teleop_session_manager.TeleopSession`
-    auto-discovers it as a graph leaf, registers its underlying
-    :class:`~isaacteleop.deviceio_trackers.ControllerTracker` for OpenXR
-    extension aggregation, and calls ``poll_tracker(deviceio_session)`` once
-    per frame. ``poll_tracker`` drains the device queue and forwards the
-    pulses to ``controller_tracker.apply_haptic_feedback(session, side, ...)``.
+    Implemented as an :class:`IDeviceIOSource` so ``TeleopSession`` discovers
+    it as a graph leaf, registers its ``ControllerTracker`` for OpenXR
+    extension aggregation, and calls ``poll_tracker(deviceio_session)`` each
+    frame. ``poll_tracker`` drains the device queue and forwards the pulses
+    to ``controller_tracker.apply_haptic_feedback(session, side, ...)``.
 
-    .. warning::
-        **Discovery requires a declared output.** ``TeleopSession`` discovers
-        :class:`IDeviceIOSource` leaves by walking back from the outputs
-        declared on the user's :class:`~isaacteleop.retargeting_engine.interface.OutputCombiner`.
-        If you build a custom pipeline, you **must** include
-        :attr:`OpenXRControllerHapticSource.HEARTBEAT` (or any output of this
-        node) as one of the combiner's outputs, otherwise the source is never
-        polled, the tracker is never registered, and haptics silently never
-        fire. Use :func:`~isaaclab_teleop.tactile_helpers.build_default_openxr_controller_pipeline`
-        if you do not need a custom pipeline -- it wires the heartbeat for
-        you.
+    Two requirements for custom pipelines:
 
-    .. warning::
-        **Share the same** :class:`ControllerTracker` **instance with any
-        existing** :class:`~isaacteleop.retargeting_engine.deviceio_source_nodes.ControllersSource`.
-        ``DeviceIOSession`` deduplicates trackers by raw pointer, so passing
-        two distinct ``ControllerTracker()`` instances will create two
-        ``LiveControllerTrackerImpl`` objects that both try to attach an
-        action set to the same ``XrSession`` -- the second attach raises
-        ``XR_ERROR_ACTIONSETS_ALREADY_ATTACHED`` and the session aborts. Use
-        :meth:`for_controllers_source` (below) or pass
-        ``controllers_source.get_tracker()`` explicitly to avoid this.
+    * **Heartbeat must be reachable from the user's ``OutputCombiner``** — the
+      session walks back from declared outputs to find leaves; without
+      ``HEARTBEAT`` (or any other output of this node) wired in, the source
+      is never polled and haptics silently do not fire.
+    * **The ``ControllerTracker`` instance must be shared** with any
+      ``ControllersSource`` already in the pipeline. ``DeviceIOSession``
+      deduplicates trackers by pointer; two distinct instances both try to
+      attach an action set to the same ``XrSession`` and the second attach
+      raises ``XR_ERROR_ACTIONSETS_ALREADY_ATTACHED``. Use
+      :meth:`for_controllers_source` to avoid this footgun.
     """
 
     HEARTBEAT = "_openxr_haptic_heartbeat"
@@ -173,9 +130,6 @@ class OpenXRControllerHapticSource(IDeviceIOSource):
     ) -> None:
         self._device = device
         self._controller_tracker = controller_tracker
-        # Logged-at-most-once per side so a missing C++ haptic method
-        # (e.g. running against an older TeleopCore build that has not
-        # been rebuilt with the haptic extension) does not flood the log.
         self._error_logged: dict[str, bool] = {"left": False, "right": False}
         super().__init__(name)
 
@@ -186,26 +140,12 @@ class OpenXRControllerHapticSource(IDeviceIOSource):
         device: OpenXRControllerHapticDevice,
         controllers_source: Any,
     ) -> "OpenXRControllerHapticSource":
-        """Construct a haptic source that shares its tracker with a controllers source.
+        """Build a source that shares its tracker with ``controllers_source``.
 
-        Convenience wrapper around the constructor that fetches
-        ``controllers_source.get_tracker()`` for you, so the two sources
-        cannot accidentally diverge on which ``ControllerTracker`` instance
-        they hold. See the class docstring for why sharing matters.
-
-        Args:
-            name: Unique pipeline node name.
-            device: The :class:`OpenXRControllerHapticDevice` whose queue this
-                source will drain.
-            controllers_source: The
-                :class:`~isaacteleop.retargeting_engine.deviceio_source_nodes.ControllersSource`
-                already in the pipeline. Anything with a ``get_tracker()``
-                method returning a ``ControllerTracker`` works (typed as
-                ``Any`` to avoid a circular import).
-
-        Returns:
-            A new :class:`OpenXRControllerHapticSource` bound to the same
-            tracker as ``controllers_source``.
+        Prefer this over the bare constructor: it fetches
+        ``controllers_source.get_tracker()`` for you so the two sources
+        cannot diverge on the ``ControllerTracker`` instance they hold. See
+        the class docstring for why sharing matters.
         """
         return cls(name, device, controllers_source.get_tracker())
 
@@ -213,10 +153,6 @@ class OpenXRControllerHapticSource(IDeviceIOSource):
         return {}
 
     def output_spec(self) -> RetargeterIOType:
-        # Heartbeat output exists purely so OutputCombiner can include this
-        # leaf in its graph traversal (TeleopSession discovers IDeviceIOSource
-        # leaves by walking back from declared OutputCombiner outputs).
-        # The helper in `isaaclab_teleop.tactile_helpers` wires it up.
         return {
             self.HEARTBEAT: TensorGroupType(
                 "_openxr_haptic_heartbeat", [BoolType("ok")]
@@ -234,23 +170,17 @@ class OpenXRControllerHapticSource(IDeviceIOSource):
         ) in self._device.drain_pending().items():
             try:
                 self._controller_tracker.apply_haptic_feedback(
-                    deviceio_session,
-                    side,
-                    amplitude,
-                    frequency_hz,
-                    duration_s,
+                    deviceio_session, side, amplitude, frequency_hz, duration_s
                 )
             except Exception as exc:
                 if not self._error_logged[side]:
                     logger.warning(
                         "OpenXRControllerHapticSource.poll_tracker(%s) failed "
-                        "(will silence further errors for this side): %s",
+                        "(further errors for this side will be silenced): %s",
                         side,
                         exc,
                     )
                     self._error_logged[side] = True
-        # The IDeviceIOSource contract expects a dict matching input_spec; we
-        # have no inputs so an empty dict is correct.
         return {}
 
     def _compute_fn(

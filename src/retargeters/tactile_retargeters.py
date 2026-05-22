@@ -1,30 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Tactile / haptic retargeters.
+"""Tactile / haptic retargeters (vendor-neutral).
 
-Two groups, both vendor-neutral:
+Two groups:
 
-* **Composable spatial primitives** (:class:`Vector3FrameTransform`,
-  :class:`WorldForceAccumulator`, :class:`MagnitudeReducer`) operate on
-  sim-side :func:`~isaacteleop.retargeting_engine.tensor_types.TactileVector`
-  flows. They are the building blocks every per-device mapper composes with.
-
-* **Per-device mappers** (:class:`TactileVectorToFingerPower`,
-  :class:`TactileHeatmapToFingerPower`, :class:`TactileHeatmapToWristPulse`,
-  :class:`TactileVectorToControllerPulse`,
-  :class:`TactileHeatmapToControllerPulse`,
-  :class:`FingerPowerToControllerPulse`) translate sim-side tactile data --
-  or already-reduced device-side per-finger power -- into one of the
-  device-side schemas declared in
-  :mod:`~isaacteleop.retargeting_engine.tensor_types.tactile_types`. They are
-  named after the target schema, not the vendor -- any vendor whose device
-  accepts the same schema reuses the same mapper.
-
-When the Haply force-feedback adapter lands, ``ContactForceToEndEffectorForce``
-and ``TactileHeatmapToEndEffectorForce`` slot into this file with no
-restructuring; they compose the same spatial primitives above.
+* **Composable spatial primitives** -- :class:`Vector3FrameTransform`,
+  :class:`WorldForceAccumulator`, :class:`MagnitudeReducer` -- operating on
+  sim-side ``TactileVector`` flows.
+* **Per-device mappers** -- ``Tactile{Vector,Heatmap}To{FingerPower,WristPulse,ControllerPulse}``
+  and :class:`FingerPowerToControllerPulse` -- named after the target device-side
+  schema, not the vendor.
 """
 
 from __future__ import annotations
@@ -61,32 +47,19 @@ from isaacteleop.retargeting_engine.tensor_types import (
 
 
 class Vector3FrameTransform(BaseRetargeter):
-    """Rotate a sim-frame :func:`TactileVector(3)` into a new frame.
+    """Rotate a sim-frame ``TactileVector(3)`` into a new frame (rotation only).
 
-    .. note::
-        **Rotation-only.** This node is force-vector oriented: ``TactileVector(3)``
-        is treated as a *free vector* (e.g. a contact force or torque),
-        so the translation column of the input ``TransformMatrix`` is
-        intentionally ignored and only the upper-left 3x3 rotation block is
-        applied. To transform a *position* (where translation matters), use a
-        full 4x4 affine multiply at a layer that knows the input is a point,
-        not in this node.
+    Treats the input as a free vector (e.g. a contact force / torque) and
+    applies only the upper-left 3x3 of the input ``TransformMatrix``; the
+    translation column is intentionally ignored. Use a full 4x4 affine
+    multiply elsewhere if the value is a position.
 
     Inputs:
-        - ``"vec"``: :func:`TactileVector(3) <isaacteleop.retargeting_engine.tensor_types.TactileVector>`
-          (a 3-vector free quantity) in the source frame.
-        - ``"transform"``: :func:`TransformMatrix <isaacteleop.retargeting_engine.tensor_types.TransformMatrix>`
-          ``(4, 4)`` -- the source-to-target homogeneous transform; only the
-          rotation block ``M[:3, :3]`` is read.
+        - ``"vec"``: ``TactileVector(3)`` in the source frame.
+        - ``"transform"``: ``TransformMatrix`` (4x4); only ``M[:3, :3]`` is read.
 
     Outputs:
-        - ``"vec"``: :func:`TactileVector(3)` in the target frame.
-
-    Used to compose Concern A (frame mismatch) of the tactile-haptic factoring
-    described in the design doc. The ``"transform"`` input is typically the
-    optional ``world_T_haptic`` :class:`~isaacteleop.retargeting_engine.interface.value_input.ValueInput`
-    leaf fed by IsaacTeleopDevice when ``IsaacTeleopHapticCfg.haptic_device_frame_prim_path``
-    is set, but any pipeline node producing a ``TransformMatrix`` is valid.
+        - ``"vec"``: ``TactileVector(3)`` in the target frame.
     """
 
     INPUT_VEC = "vec"
@@ -112,24 +85,14 @@ class Vector3FrameTransform(BaseRetargeter):
 
 
 class WorldForceAccumulator(BaseRetargeter):
-    """Sum N :func:`TactileVector(3)` inputs into one, with optional per-input weights.
+    """Weighted sum of N ``TactileVector(3)`` inputs in a common frame.
 
-    Inputs:
-        - ``"in_0"``, ``"in_1"``, ... ``"in_{num_inputs - 1}"``: each a
-          :func:`TactileVector(3) <isaacteleop.retargeting_engine.tensor_types.TactileVector>`
-          in a common frame.
+    Tunable ``weights`` (``VectorParameter`` of length ``num_inputs``, default
+    all ones) lets an operator attenuate or zero out individual contributing
+    bodies from the tuning UI.
 
-    Outputs:
-        - ``"vec"``: :func:`TactileVector(3)` = sum of ``weights[i] * in_i``.
-
-    Tunable parameters:
-        - ``weights``: :class:`VectorParameter` of length ``num_inputs``
-          (default: all ones). Exposed in the tuning UI so an operator can
-          attenuate or zero out individual contributing bodies live.
-
-    Useful upstream of :class:`Vector3FrameTransform` to combine forces from
-    multiple sim contact sensors (e.g. left and right Franka fingers) before
-    rotating into the device frame.
+    Inputs: ``"in_0"`` ... ``"in_{num_inputs - 1}"`` -- each ``TactileVector(3)``.
+    Outputs: ``"vec"`` -- sum of ``weights[i] * in_i``.
     """
 
     OUTPUT_VEC = "vec"
@@ -193,34 +156,17 @@ _MagnitudeMode = Literal["norm", "axis_x", "axis_y", "axis_z"]
 
 
 class MagnitudeReducer(BaseRetargeter):
-    """Reduce a :func:`TactileVector(3)` to a :func:`TactileVector(1)` scalar.
+    """Reduce a ``TactileVector(3)`` to a ``TactileVector(1)`` scalar.
 
-    Inputs:
-        - ``"vec"``: :func:`TactileVector(3) <isaacteleop.retargeting_engine.tensor_types.TactileVector>`.
-
-    Outputs:
-        - ``"scalar"``: :func:`TactileVector(1) <isaacteleop.retargeting_engine.tensor_types.TactileVector>`
-          (the reduced magnitude).
-
-    The reduction *mode* is fixed at construction time:
+    Bridges directional contact data into frame-invariant device schemas
+    (``FingerPowerVector``, ``ControllerHapticPulse``). Mode is fixed at
+    construction:
 
     * ``"norm"`` -- Euclidean length ``||vec||_2``.
     * ``"axis_x"`` / ``"axis_y"`` / ``"axis_z"`` -- absolute value of the
-      corresponding component (use these after :class:`Vector3FrameTransform`
-      when the device cares about pressure normal to a known axis).
-
-    Used to bridge directional contact data (a 3-vector force) into the
-    frame-invariant device schemas that only care about magnitude
-    (:func:`FingerPowerVector`, :func:`ControllerHapticPulse`).
-
-    .. note::
-        The design doc lists the original mode set as
-        ``{'norm', 'axis_z', 'dot_with_normal'}``. The ``axis_z`` mode is a
-        special case of the per-axis modes shipped here (``axis_x`` /
-        ``axis_y`` / ``axis_z``); ``dot_with_normal`` was deferred to a later
-        change because it can be expressed as a pre-rotation via
-        :class:`Vector3FrameTransform` plus ``axis_z``, and there is no v1
-        consumer that needs it directly.
+      corresponding component (typically chained after a
+      ``Vector3FrameTransform`` when the device cares about pressure normal
+      to a known axis).
     """
 
     INPUT_VEC = "vec"
@@ -695,22 +641,15 @@ class TactileVectorToControllerPulse(BaseRetargeter):
     The taxels are reduced to a single magnitude via ``reduction``
     (``"max"``, ``"mean"``, ``"sum"``), passed through the gain / deadband /
     saturation curve to become ``amplitude`` in ``[0, saturation]``, then
-    paired with constant ``frequency_hz`` / ``duration_s`` parameters. Both
-    default to ``0.0`` so every conformant OpenXR runtime is free to pick
-    ``XR_FREQUENCY_UNSPECIFIED`` and ``XR_MIN_HAPTIC_DURATION``.
+    paired with constant ``frequency_hz`` / ``duration_s`` parameters
+    (defaults ``0.0`` map to ``XR_FREQUENCY_UNSPECIFIED`` /
+    ``XR_MIN_HAPTIC_DURATION`` on the runtime).
 
     Tunable parameters: ``gain``, ``deadband``, ``saturation``,
-    ``frequency_hz``, ``duration_s``.
-
-    .. note::
-        Unlike :class:`TactileVectorToFingerPower`, this mapper has no
-        ``smoothing`` parameter. ``xrApplyHapticFeedback`` already supersedes
-        any in-flight pulse on the same action every frame, so the runtime
-        sees a fresh amplitude each step. EMA-smoothing the amplitude in
-        Python before that overwrite would just shift the latency without
-        meaningfully shaping the felt vibration, so the parameter is
-        intentionally omitted. Add an upstream low-pass retargeter on the
-        :class:`TactileVector` input if you need temporal shaping.
+    ``frequency_hz``, ``duration_s``. No ``smoothing`` parameter:
+    ``xrApplyHapticFeedback`` supersedes any in-flight pulse every frame, so
+    EMA-smoothing in Python only shifts latency. Add an upstream low-pass
+    retargeter on the ``TactileVector`` input if you need temporal shaping.
     """
 
     INPUT_TACTILE = "tactile"
@@ -945,34 +884,21 @@ class TactileHeatmapToControllerPulse(BaseRetargeter):
 
 
 class FingerPowerToControllerPulse(BaseRetargeter):
-    """Reduce a :func:`FingerPowerVector` to one :func:`ControllerHapticPulse`.
+    """Reduce a ``FingerPowerVector`` to one ``ControllerHapticPulse``.
 
-    Bridges per-finger glove-style output to single-channel controller rumble:
-    given an already-reduced device-side
-    :func:`FingerPowerVector(num_fingers) <isaacteleop.retargeting_engine.tensor_types.FingerPowerVector>`
-    in ``[0, 1]`` (e.g. the output of :class:`TactileVectorToFingerPower` or
-    of an upstream pinch-proximity retargeter), this collapses the channels
-    to a single amplitude with the chosen ``reduction`` and pairs it with
-    constant ``frequency_hz`` / ``duration_s`` parameters.
+    Bridges per-finger glove output to single-channel controller rumble.
+    Collapses the channels to a single amplitude via ``reduction``, applies
+    the same gain / deadband / saturation curve as
+    :class:`TactileVectorToControllerPulse` (so the rumble can be tuned
+    independently of the upstream signal), and pairs the result with constant
+    ``frequency_hz`` / ``duration_s`` parameters.
 
-    The same gain / deadband / saturation curve as
-    :class:`TactileVectorToControllerPulse` is applied so the controller
-    pulse can be tuned independently of the upstream per-finger signal -- the
-    operator can scale the rumble up, suppress weak signals, or cap the
-    saturation without touching the per-finger pipeline.
+    Inputs: ``"powers"`` -- ``FingerPowerVector(num_fingers)``.
+    Outputs: ``"pulse"`` -- ``[amplitude, frequency_hz, duration_s]``.
 
-    Inputs:
-        - ``"powers"``: :func:`FingerPowerVector(num_fingers) <isaacteleop.retargeting_engine.tensor_types.FingerPowerVector>`.
-
-    Outputs:
-        - ``"pulse"``: :func:`ControllerHapticPulse <isaacteleop.retargeting_engine.tensor_types.ControllerHapticPulse>`
-          = ``[amplitude, frequency_hz, duration_s]``.
-
-    Tunable parameters: ``gain``, ``deadband``, ``saturation``,
-    ``frequency_hz``, ``duration_s``.
-
-    See :class:`TactileVectorToControllerPulse`'s note for why this mapper has
-    no ``smoothing`` parameter.
+    Tunable: ``gain``, ``deadband``, ``saturation``, ``frequency_hz``,
+    ``duration_s``. No ``smoothing`` for the same reason as
+    :class:`TactileVectorToControllerPulse`.
     """
 
     INPUT_POWERS = "powers"

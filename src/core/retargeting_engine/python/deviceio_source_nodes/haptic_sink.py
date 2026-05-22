@@ -13,7 +13,7 @@ mistakes fail before the first hardware call.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 
@@ -30,64 +30,39 @@ if TYPE_CHECKING:
 class HapticSink(BaseRetargeter):
     """Per-frame sink for haptic feedback through any :class:`IHapticDevice` adapter.
 
+    Calls :meth:`IHapticDevice.apply` for each side whose input is present
+    *and* :meth:`IHapticDevice.supports` returns ``True``, so single-handed
+    devices cleanly no-op the unused side.
+
     Inputs:
-        - ``"left"`` / ``"right"``: optional ``device.accepted_type()`` payloads
-          (one frame of device-side values per side). Optional so a one-handed
-          rig can wire only the side it actually drives.
+        - ``"left"`` / ``"right"``: optional ``device.accepted_type()`` payloads.
 
     Outputs:
-        - ``"_haptic_heartbeat"``: a single bool, always ``True``. Exposed only
-          so :class:`~isaacteleop.retargeting_engine.interface.output_combiner.OutputCombiner`
-          can include the sink in its graph traversal -- the combiner only
-          executes nodes that are reachable from a declared output. The
-          heartbeat is never consumed by downstream code and the
-          ``_`` prefix in its name signals "internal plumbing"; the helpers in
-          :mod:`isaaclab_teleop.tactile_helpers` wire it up automatically.
-
-    .. warning::
-        If you build a custom :class:`OutputCombiner` instead of going through
-        the ``isaaclab_teleop.tactile_helpers`` helpers, you **must** include
-        :attr:`HapticSink.HEARTBEAT` (or any other output reachable from this
-        node) as one of the combiner's outputs. A reachable output is the
-        only way ``OutputCombiner.get_leaf_nodes`` will discover the sink and
-        run its ``_compute_fn``; without it, ``device.apply()`` is never
-        called and haptics silently do not fire.
-
-    The sink calls :meth:`IHapticDevice.apply` for each side whose input is
-    present *and* :meth:`IHapticDevice.supports` returns ``True`` -- this lets
-    single-handed devices (e.g. Haply Inverse3) cleanly no-op the unused side
-    without the upstream pipeline knowing.
-
-    Modeled after :class:`MessageChannelSink`. Whether the adapter writes
-    to hardware synchronously (Manus, via the plugin singleton) or queues
-    for a paired :class:`~isaacteleop.retargeting_engine.deviceio_source_nodes.interface.IDeviceIOSource`
-    to flush against the active session (OpenXR controllers) is the
-    adapter's concern -- ``HapticSink`` is identical in both cases.
+        - ``"_haptic_heartbeat"``: always ``True``. Required so
+          :class:`OutputCombiner` reaches the sink during graph traversal --
+          a custom combiner that omits this output will never invoke the sink
+          and haptics will silently not fire.
     """
 
-    LEFT = "left"
-    RIGHT = "right"
-    HEARTBEAT = "_haptic_heartbeat"
+    # Literal annotations so the iteration in ``_compute_fn`` is compatible
+    # with ``IHapticDevice.{supports,apply}``, both of which take ``Side``.
+    LEFT: Literal["left"] = "left"
+    RIGHT: Literal["right"] = "right"
+    HEARTBEAT: Literal["_haptic_heartbeat"] = "_haptic_heartbeat"
 
     def __init__(self, name: str, device: "IHapticDevice") -> None:
-        """Construct a haptic sink bound to ``device``.
-
-        Args:
-            name: Unique pipeline node name.
-            device: Vendor-specific :class:`IHapticDevice` adapter. The
-                accepted type is captured from ``device.accepted_type()``
-                at construction time and used in :meth:`input_spec`.
-        """
         self._device = device
         super().__init__(name)
 
     @property
     def device(self) -> "IHapticDevice":
-        """Return the adapter this sink writes to."""
         return self._device
 
     def input_spec(self) -> RetargeterIOType:
-        accepted = self._device.accepted_type()
+        # ``IHapticDevice`` lives outside the mypy target tree and imports
+        # ``TensorGroupType`` via its absolute path; the cast bridges the two
+        # views of the same runtime class.
+        accepted = cast(TensorGroupType, self._device.accepted_type())
         return {
             self.LEFT: OptionalType(accepted),
             self.RIGHT: OptionalType(accepted),
@@ -104,17 +79,7 @@ class HapticSink(BaseRetargeter):
     ) -> None:
         for side in (self.LEFT, self.RIGHT):
             group = inputs[side]
-            if group.is_none:
+            if group.is_none or not self._device.supports(side):
                 continue
-            if not self._device.supports(side):
-                continue
-            # Pull tensor 0 (the only inner tensor of every device-side schema
-            # in v1: FingerPowerVector, ControllerHapticPulse, EndEffectorForce
-            # are all single-NDArray groups). Materialise as a CPU NumPy array
-            # since adapters write to host-side hardware APIs that do not
-            # speak DLPack directly.
-            values = np.asarray(group[0])
-            self._device.apply(side, values)
-        # Heartbeat output exists purely so OutputCombiner can include this
-        # sink in its graph traversal; the value is never consumed.
+            self._device.apply(side, np.asarray(group[0]))
         outputs[self.HEARTBEAT][0] = True
