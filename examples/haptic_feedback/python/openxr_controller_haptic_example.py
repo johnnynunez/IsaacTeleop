@@ -298,6 +298,11 @@ def _positive_float(value: str) -> float:
         n = float(value)
     except ValueError:
         raise argparse.ArgumentTypeError(f"expected a positive float, got {value!r}")
+    # Reject nan / inf before the range check: `nan <= 0.0` is False, so a bare
+    # range check would silently accept non-finite amplitudes / durations and
+    # leak them into the haptic pipeline.
+    if not math.isfinite(n):
+        raise argparse.ArgumentTypeError(f"must be finite, got {n}")
     if n <= 0.0:
         raise argparse.ArgumentTypeError(f"must be > 0, got {n}")
     return n
@@ -308,12 +313,15 @@ def _non_negative_float(value: str) -> float:
         n = float(value)
     except ValueError:
         raise argparse.ArgumentTypeError(f"expected a number, got {value!r}")
+    if not math.isfinite(n):
+        raise argparse.ArgumentTypeError(f"must be finite, got {n}")
     if n < 0.0:
         raise argparse.ArgumentTypeError(f"must be >= 0, got {n}")
     return n
 
 
 def _unit_float(value: str) -> float:
+    # _non_negative_float rejects nan/inf, so this stays in [0, 1].
     n = _non_negative_float(value)
     if n > 1.0:
         raise argparse.ArgumentTypeError(f"must be in [0, 1], got {n}")

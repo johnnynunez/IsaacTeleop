@@ -19,6 +19,7 @@ import numpy.testing as npt
 import pytest
 
 from isaacteleop.retargeters.tactile_retargeters import (
+    FingerPowerToControllerPulse,
     MagnitudeReducer,
     TactileHeatmapToControllerPulse,
     TactileHeatmapToFingerPower,
@@ -316,6 +317,104 @@ class TestTactileVectorToControllerPulse:
             float(np.asarray(outputs["pulse"][0])[ControllerHapticPulseField.AMPLITUDE])
             == 0.0
         )
+
+
+class TestFingerPowerToControllerPulse:
+    """``FingerPowerToControllerPulse`` collapses an already-reduced
+    ``FingerPowerVector`` (per-finger glove output) to a single controller
+    pulse. Bridges glove-style pipelines to single-channel motor rumble; this
+    is the public version of the helper that used to live in the hand-pinch
+    example."""
+
+    def test_max_reduction_picks_strongest_finger(self) -> None:
+        node = FingerPowerToControllerPulse(
+            "finger_power_to_pulse",
+            num_fingers=NUM_HAPTIC_FINGERS,
+            reduction="max",
+            frequency_hz=120.0,
+            duration_s=0.05,
+        )
+        outputs = _run(node, {"powers": [0.1, 0.4, 0.9, 0.2, 0.3]})
+        pulse = np.asarray(outputs["pulse"][0])
+        assert pulse[ControllerHapticPulseField.AMPLITUDE] == pytest.approx(0.9)
+        assert pulse[ControllerHapticPulseField.FREQUENCY_HZ] == pytest.approx(120.0)
+        assert pulse[ControllerHapticPulseField.DURATION_S] == pytest.approx(0.05)
+
+    def test_mean_reduction_averages_fingers(self) -> None:
+        node = FingerPowerToControllerPulse(
+            "finger_power_to_pulse",
+            num_fingers=NUM_HAPTIC_FINGERS,
+            reduction="mean",
+        )
+        outputs = _run(node, {"powers": [0.1, 0.2, 0.3, 0.4, 0.5]})
+        pulse = np.asarray(outputs["pulse"][0])
+        assert pulse[ControllerHapticPulseField.AMPLITUDE] == pytest.approx(0.3)
+
+    def test_zero_frequency_and_duration_pass_through(self) -> None:
+        """Defaults of 0/0 round-trip exactly so the C++ side can map them
+        to ``XR_FREQUENCY_UNSPECIFIED`` / ``XR_MIN_HAPTIC_DURATION``."""
+        node = FingerPowerToControllerPulse(
+            "finger_power_to_pulse", num_fingers=NUM_HAPTIC_FINGERS
+        )
+        outputs = _run(node, {"powers": [0.0, 0.0, 0.5, 0.0, 0.0]})
+        pulse = np.asarray(outputs["pulse"][0])
+        assert pulse[ControllerHapticPulseField.FREQUENCY_HZ] == 0.0
+        assert pulse[ControllerHapticPulseField.DURATION_S] == 0.0
+
+    def test_deadband_suppresses_weak_signal(self) -> None:
+        """Lets a custom controller pulse stay quiet under a per-finger
+        threshold even though the upstream FingerPowerVector is non-zero."""
+        node = FingerPowerToControllerPulse(
+            "finger_power_to_pulse",
+            num_fingers=NUM_HAPTIC_FINGERS,
+            deadband=0.5,
+        )
+        outputs = _run(node, {"powers": [0.1, 0.2, 0.3, 0.0, 0.0]})
+        assert (
+            float(np.asarray(outputs["pulse"][0])[ControllerHapticPulseField.AMPLITUDE])
+            == 0.0
+        )
+
+    def test_gain_scales_post_deadband(self) -> None:
+        """Operator can boost rumble independently of the upstream amplitude."""
+        node = FingerPowerToControllerPulse(
+            "finger_power_to_pulse",
+            num_fingers=NUM_HAPTIC_FINGERS,
+            deadband=0.1,
+            gain=5.0,
+            saturation=1.0,
+        )
+        outputs = _run(node, {"powers": [0.0, 0.0, 0.3, 0.0, 0.0]})
+        amp = float(
+            np.asarray(outputs["pulse"][0])[ControllerHapticPulseField.AMPLITUDE]
+        )
+        # raw = 0.3, deadband -> 0.2, gain*0.2 = 1.0, clamped to saturation=1.0.
+        assert amp == pytest.approx(1.0)
+
+    def test_saturation_caps_amplitude(self) -> None:
+        node = FingerPowerToControllerPulse(
+            "finger_power_to_pulse",
+            num_fingers=NUM_HAPTIC_FINGERS,
+            gain=10.0,
+            saturation=0.4,
+        )
+        outputs = _run(node, {"powers": [0.0, 0.0, 1.0, 0.0, 0.0]})
+        amp = float(
+            np.asarray(outputs["pulse"][0])[ControllerHapticPulseField.AMPLITUDE]
+        )
+        assert amp == pytest.approx(0.4)
+
+    def test_rejects_zero_fingers(self) -> None:
+        with pytest.raises(ValueError, match="num_fingers"):
+            FingerPowerToControllerPulse("finger_power_to_pulse", num_fingers=0)
+
+    def test_rejects_unknown_reduction(self) -> None:
+        with pytest.raises(ValueError, match="unknown reduction"):
+            FingerPowerToControllerPulse(
+                "finger_power_to_pulse",
+                num_fingers=NUM_HAPTIC_FINGERS,
+                reduction="median",  # type: ignore[arg-type]
+            )
 
 
 class TestHeatmapMappers:

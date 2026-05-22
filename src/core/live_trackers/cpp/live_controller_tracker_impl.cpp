@@ -471,13 +471,27 @@ void LiveControllerTrackerImpl::apply_haptic_feedback(bool is_left,
     const size_t slot = is_left ? 0 : 1;
     const char* const side_name = is_left ? "left" : "right";
 
+    // Sanitize non-finite inputs (NaN / +-Inf) up front:
+    //   * std::clamp does not sanitize NaN (NaN-vs-bound comparisons are
+    //     unordered, so NaN passes through unchanged);
+    //   * `nan <= 0.0f` is false, so NaN amplitude / duration would skip the
+    //     "explicit stop" / "runtime default" branches below; and
+    //   * static_cast<XrDuration>(NaN or out-of-range Inf) is undefined
+    //     behaviour per [conv.fpint] (XrDuration is int64).
+    // Mapping non-finite to zero routes them through the existing zero-handling
+    // paths (amplitude=0 -> stop, duration_s=0 -> XR_MIN_HAPTIC_DURATION,
+    // frequency_hz=0 -> XR_FREQUENCY_UNSPECIFIED).
+    const float safe_amplitude = std::isfinite(amplitude) ? amplitude : 0.0f;
+    const float safe_duration_s = std::isfinite(duration_s) ? duration_s : 0.0f;
+    const float safe_frequency_hz = std::isfinite(frequency_hz) ? frequency_hz : 0.0f;
+
     XrHapticActionInfo info{ XR_TYPE_HAPTIC_ACTION_INFO };
     info.action = haptic_action_;
     info.subactionPath = subaction_path;
 
     // amplitude==0 maps to an explicit stop instead of a zero-amplitude pulse,
     // so dropping below the upstream deadband cleanly aborts an in-flight rumble.
-    if (amplitude <= 0.0f)
+    if (safe_amplitude <= 0.0f)
     {
         if (core_funcs_.xrStopHapticFeedback == nullptr)
         {
@@ -508,14 +522,21 @@ void LiveControllerTrackerImpl::apply_haptic_feedback(bool is_left,
     }
 
     XrHapticVibration vibration{ XR_TYPE_HAPTIC_VIBRATION };
-    vibration.amplitude = std::clamp(amplitude, 0.0f, 1.0f);
+    vibration.amplitude = std::clamp(safe_amplitude, 0.0f, 1.0f);
     // duration_s == 0 -> shortest pulse the runtime supports. Use double for
     // the seconds->nanoseconds conversion: float has ~7 decimal digits and
-    // can lose tens of microseconds for multi-second pulses.
+    // can lose tens of microseconds for multi-second pulses. Clamp the
+    // converted nanoseconds to a safe range that round-trips to int64 without
+    // overflow (real haptic pulses are sub-second, so 1e18 ns ~= 31 years is a
+    // generous upper bound that stays well below INT64_MAX ~= 9.22e18).
+    constexpr double k_max_duration_ns = 1.0e18;
     vibration.duration =
-        (duration_s <= 0.0f) ? XR_MIN_HAPTIC_DURATION : static_cast<XrDuration>(static_cast<double>(duration_s) * 1.0e9);
+        (safe_duration_s <= 0.0f)
+            ? XR_MIN_HAPTIC_DURATION
+            : static_cast<XrDuration>(
+                  std::clamp(static_cast<double>(safe_duration_s) * 1.0e9, 0.0, k_max_duration_ns));
     // frequency_hz == 0 -> let the runtime pick.
-    vibration.frequency = (frequency_hz <= 0.0f) ? XR_FREQUENCY_UNSPECIFIED : frequency_hz;
+    vibration.frequency = (safe_frequency_hz <= 0.0f) ? XR_FREQUENCY_UNSPECIFIED : safe_frequency_hz;
 
     const XrResult apply_result = core_funcs_.xrApplyHapticFeedback(
         session_, &info, reinterpret_cast<const XrHapticBaseHeader*>(&vibration));

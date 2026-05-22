@@ -37,6 +37,7 @@ into the same sink without changing the per-side mapper.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 from typing import Any
@@ -48,6 +49,7 @@ from isaacteleop.haptic_devices.openxr_controller import (
     OpenXRControllerHapticDevice,
     OpenXRControllerHapticSource,
 )
+from isaacteleop.retargeters.tactile_retargeters import FingerPowerToControllerPulse
 from isaacteleop.retargeting_engine.deviceio_source_nodes import (
     ControllersSource,
     HandsSource,
@@ -64,14 +66,12 @@ from isaacteleop.retargeting_engine.interface.retargeter_core_types import (
 )
 from isaacteleop.retargeting_engine.interface.tensor_group_type import OptionalType
 from isaacteleop.retargeting_engine.tensor_types import (
-    ControllerHapticPulse,
     ControllerHapticPulseField,
     FingerIndex,
     FingerPowerVector,
     HandInput,
     HandInputIndex,
     HandJointIndex,
-    NUM_CONTROLLER_HAPTIC_FIELDS,
     NUM_HAPTIC_FINGERS,
 )
 from isaacteleop.teleop_session_manager import TeleopSession, TeleopSessionConfig
@@ -202,51 +202,6 @@ class PinchProximityToFingerPower(BaseRetargeter):
         # signal so the user feels the pinch on both pads.
         powers[FingerIndex.THUMB] = max_finger_power
         outputs[self.OUTPUT_POWERS][0] = powers
-
-
-class FingerPowerToControllerPulse(BaseRetargeter):
-    """Collapse a :func:`FingerPowerVector` to one :func:`ControllerHapticPulse`.
-
-    Single-channel adapter for users routing pinch feedback to an OpenXR
-    motion controller (one motor per hand). Takes the max across fingers --
-    matches "the most-pinched finger drives the rumble" intuition.
-
-    Pure shim, no tunables -- frequency / duration come from the constructor
-    so the controller-side pulse parameters are still configurable but the
-    amplitude is unmodified from the FingerPowerVector input.
-    """
-
-    INPUT_POWERS = "powers"
-    OUTPUT_PULSE = "pulse"
-
-    def __init__(
-        self,
-        name: str,
-        frequency_hz: float = 0.0,
-        duration_s: float = 0.0,
-        num_fingers: int = NUM_HAPTIC_FINGERS,
-    ) -> None:
-        self._frequency_hz = float(frequency_hz)
-        self._duration_s = float(duration_s)
-        self._num_fingers = int(num_fingers)
-        super().__init__(name=name)
-
-    def input_spec(self) -> RetargeterIOType:
-        return {self.INPUT_POWERS: FingerPowerVector(self._num_fingers)}
-
-    def output_spec(self) -> RetargeterIOType:
-        return {self.OUTPUT_PULSE: ControllerHapticPulse()}
-
-    def _compute_fn(
-        self, inputs: RetargeterIO, outputs: RetargeterIO, context: ComputeContext
-    ) -> None:
-        powers = np.asarray(inputs[self.INPUT_POWERS][0], dtype=np.float32)
-        amplitude = float(powers.max()) if powers.size else 0.0
-        pulse = np.zeros(NUM_CONTROLLER_HAPTIC_FIELDS, dtype=np.float32)
-        pulse[ControllerHapticPulseField.AMPLITUDE] = amplitude
-        pulse[ControllerHapticPulseField.FREQUENCY_HZ] = self._frequency_hz
-        pulse[ControllerHapticPulseField.DURATION_S] = self._duration_s
-        outputs[self.OUTPUT_PULSE][0] = pulse
 
 
 # ============================================================================
@@ -438,6 +393,11 @@ def _positive_float(value: str) -> float:
         n = float(value)
     except ValueError:
         raise argparse.ArgumentTypeError(f"expected a positive float, got {value!r}")
+    # Reject nan / inf before the range check: `nan <= 0.0` is False, so a bare
+    # range check would silently accept non-finite values and leak them into
+    # the pinch-distance / haptic-pulse parameters.
+    if not math.isfinite(n):
+        raise argparse.ArgumentTypeError(f"must be finite, got {n}")
     if n <= 0.0:
         raise argparse.ArgumentTypeError(f"must be > 0, got {n}")
     return n
@@ -448,12 +408,15 @@ def _non_negative_float(value: str) -> float:
         n = float(value)
     except ValueError:
         raise argparse.ArgumentTypeError(f"expected a number, got {value!r}")
+    if not math.isfinite(n):
+        raise argparse.ArgumentTypeError(f"must be finite, got {n}")
     if n < 0.0:
         raise argparse.ArgumentTypeError(f"must be >= 0, got {n}")
     return n
 
 
 def _unit_float(value: str) -> float:
+    # _non_negative_float rejects nan/inf, so this stays in [0, 1].
     n = _non_negative_float(value)
     if n > 1.0:
         raise argparse.ArgumentTypeError(f"must be in [0, 1], got {n}")

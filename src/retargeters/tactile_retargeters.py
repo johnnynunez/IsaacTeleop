@@ -14,8 +14,10 @@ Two groups, both vendor-neutral:
 * **Per-device mappers** (:class:`TactileVectorToFingerPower`,
   :class:`TactileHeatmapToFingerPower`, :class:`TactileHeatmapToWristPulse`,
   :class:`TactileVectorToControllerPulse`,
-  :class:`TactileHeatmapToControllerPulse`) translate sim-side tactile data
-  into one of the device-side schemas declared in
+  :class:`TactileHeatmapToControllerPulse`,
+  :class:`FingerPowerToControllerPulse`) translate sim-side tactile data --
+  or already-reduced device-side per-finger power -- into one of the
+  device-side schemas declared in
   :mod:`~isaacteleop.retargeting_engine.tensor_types.tactile_types`. They are
   named after the target schema, not the vendor -- any vendor whose device
   accepts the same schema reuses the same mapper.
@@ -925,6 +927,150 @@ class TactileHeatmapToControllerPulse(BaseRetargeter):
             scalar = float(heatmap.mean()) if heatmap.size else 0.0
         else:  # sum
             scalar = float(heatmap.sum())
+
+        amplitude = float(
+            _apply_gain_curve(
+                np.array([scalar], dtype=np.float32),
+                self._gain,
+                self._deadband,
+                self._saturation,
+            )[0]
+        )
+
+        pulse = np.zeros(NUM_CONTROLLER_HAPTIC_FIELDS, dtype=np.float32)
+        pulse[ControllerHapticPulseField.AMPLITUDE] = amplitude
+        pulse[ControllerHapticPulseField.FREQUENCY_HZ] = self._frequency_hz
+        pulse[ControllerHapticPulseField.DURATION_S] = self._duration_s
+        outputs[self.OUTPUT_PULSE][0] = pulse
+
+
+class FingerPowerToControllerPulse(BaseRetargeter):
+    """Reduce a :func:`FingerPowerVector` to one :func:`ControllerHapticPulse`.
+
+    Bridges per-finger glove-style output to single-channel controller rumble:
+    given an already-reduced device-side
+    :func:`FingerPowerVector(num_fingers) <isaacteleop.retargeting_engine.tensor_types.FingerPowerVector>`
+    in ``[0, 1]`` (e.g. the output of :class:`TactileVectorToFingerPower` or
+    of an upstream pinch-proximity retargeter), this collapses the channels
+    to a single amplitude with the chosen ``reduction`` and pairs it with
+    constant ``frequency_hz`` / ``duration_s`` parameters.
+
+    The same gain / deadband / saturation curve as
+    :class:`TactileVectorToControllerPulse` is applied so the controller
+    pulse can be tuned independently of the upstream per-finger signal -- the
+    operator can scale the rumble up, suppress weak signals, or cap the
+    saturation without touching the per-finger pipeline.
+
+    Inputs:
+        - ``"powers"``: :func:`FingerPowerVector(num_fingers) <isaacteleop.retargeting_engine.tensor_types.FingerPowerVector>`.
+
+    Outputs:
+        - ``"pulse"``: :func:`ControllerHapticPulse <isaacteleop.retargeting_engine.tensor_types.ControllerHapticPulse>`
+          = ``[amplitude, frequency_hz, duration_s]``.
+
+    Tunable parameters: ``gain``, ``deadband``, ``saturation``,
+    ``frequency_hz``, ``duration_s``.
+
+    See :class:`TactileVectorToControllerPulse`'s note for why this mapper has
+    no ``smoothing`` parameter.
+    """
+
+    INPUT_POWERS = "powers"
+    OUTPUT_PULSE = "pulse"
+
+    def __init__(
+        self,
+        name: str,
+        num_fingers: int = NUM_HAPTIC_FINGERS,
+        reduction: Literal["max", "mean", "sum"] = "max",
+        gain: float = 1.0,
+        deadband: float = 0.0,
+        saturation: float = 1.0,
+        frequency_hz: float = 0.0,
+        duration_s: float = 0.0,
+    ) -> None:
+        if num_fingers < 1:
+            raise ValueError(
+                f"FingerPowerToControllerPulse '{name}' requires num_fingers >= 1, got {num_fingers}"
+            )
+        if reduction not in ("max", "mean", "sum"):
+            raise ValueError(
+                f"FingerPowerToControllerPulse '{name}': unknown reduction '{reduction}'"
+            )
+
+        self._num_fingers = num_fingers
+        self._reduction = reduction
+
+        self._gain = gain
+        self._deadband = deadband
+        self._saturation = saturation
+        self._frequency_hz = frequency_hz
+        self._duration_s = duration_s
+
+        param_state = ParameterState(
+            name,
+            [
+                FloatParameter(
+                    name="gain",
+                    description="Scale factor applied after the deadband.",
+                    default_value=gain,
+                    min_value=0.0,
+                    max_value=100.0,
+                    sync_fn=lambda v: setattr(self, "_gain", float(v)),
+                ),
+                FloatParameter(
+                    name="deadband",
+                    description="Amplitude below which the pulse is suppressed.",
+                    default_value=deadband,
+                    min_value=0.0,
+                    max_value=10.0,
+                    sync_fn=lambda v: setattr(self, "_deadband", float(v)),
+                ),
+                FloatParameter(
+                    name="saturation",
+                    description="Maximum pulse amplitude in [0, 1].",
+                    default_value=saturation,
+                    min_value=0.0,
+                    max_value=1.0,
+                    sync_fn=lambda v: setattr(self, "_saturation", float(v)),
+                ),
+                FloatParameter(
+                    name="frequency_hz",
+                    description="OpenXR pulse frequency [Hz]. 0 = XR_FREQUENCY_UNSPECIFIED.",
+                    default_value=frequency_hz,
+                    min_value=0.0,
+                    max_value=1000.0,
+                    sync_fn=lambda v: setattr(self, "_frequency_hz", float(v)),
+                ),
+                FloatParameter(
+                    name="duration_s",
+                    description="OpenXR pulse duration [s]. 0 = XR_MIN_HAPTIC_DURATION.",
+                    default_value=duration_s,
+                    min_value=0.0,
+                    max_value=10.0,
+                    sync_fn=lambda v: setattr(self, "_duration_s", float(v)),
+                ),
+            ],
+        )
+        super().__init__(name=name, parameter_state=param_state)
+
+    def input_spec(self) -> RetargeterIOType:
+        return {self.INPUT_POWERS: FingerPowerVector(self._num_fingers)}
+
+    def output_spec(self) -> RetargeterIOType:
+        return {self.OUTPUT_PULSE: ControllerHapticPulse()}
+
+    def _compute_fn(self, inputs: RetargeterIO, outputs: RetargeterIO, context) -> None:
+        powers = np.asarray(inputs[self.INPUT_POWERS][0], dtype=np.float32).reshape(
+            self._num_fingers
+        )
+
+        if self._reduction == "max":
+            scalar = float(powers.max()) if powers.size else 0.0
+        elif self._reduction == "mean":
+            scalar = float(powers.mean()) if powers.size else 0.0
+        else:  # sum
+            scalar = float(powers.sum())
 
         amplitude = float(
             _apply_gain_curve(
