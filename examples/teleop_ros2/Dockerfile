@@ -159,6 +159,7 @@ COPY --from=nlopt_wheel /opt/nlopt-wheels /opt/nlopt-wheels
 COPY src/core/python/requirements.txt \
      src/core/python/requirements-retargeters.txt \
      src/core/python/requirements-grounding.txt \
+     src/core/python/requirements-cloudxr.txt \
      /tmp/
 RUN uv venv --python=${PYTHON_VERSION} && \
     uv pip install setuptools wheel && \
@@ -166,10 +167,12 @@ RUN uv venv --python=${PYTHON_VERSION} && \
         -r /tmp/requirements.txt \
         -r /tmp/requirements-retargeters.txt \
         -r /tmp/requirements-grounding.txt \
+        -r /tmp/requirements-cloudxr.txt \
         msgpack msgpack-numpy && \
     rm /tmp/requirements.txt \
        /tmp/requirements-retargeters.txt \
-       /tmp/requirements-grounding.txt
+       /tmp/requirements-grounding.txt \
+       /tmp/requirements-cloudxr.txt
 
 COPY --from=builder /opt/isaacteleop/install /opt/isaacteleop/install
 COPY --from=sharpa_urdfs /opt/sharpa-wave-urdfs/ /opt/isaacteleop/install/examples/teleop_ros2/assets/urdf/sharpa_standalone/

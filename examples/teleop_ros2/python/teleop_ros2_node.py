@@ -34,7 +34,12 @@ TF frames published in hand_teleop and controller_teleop modes (configurable via
   - world_frame -> left_wrist_frame
 """
 
+import os
+import signal
+import subprocess
 import time
+from contextlib import ExitStack
+from pathlib import Path
 from typing import List
 
 import msgpack
@@ -53,6 +58,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import ByteMultiArray
 from tf2_ros import TransformBroadcaster
 
+from isaacteleop.cloudxr import CloudXRLauncher
 from isaacteleop.teleop_session_manager import TeleopSession
 from geometry import make_transform
 from messages import (
@@ -70,6 +76,71 @@ from node_parameters import (
     create_node_parameters,
 )
 from session_config import build_session_config
+
+
+# Streaming SDK TCP port that CloudXR binds. The bundled launcher's
+# _cleanup_stale_runtime only handles the IPC unix socket, so a zombie that
+# released the socket but still holds this port slips through and the next
+# start dies with ERROR_STREAMSDK_PORT_UNAVAILABLE.
+_CLOUDXR_STREAMSDK_PORT = 49100
+
+
+def _kill_zombie_cloudxr_runtime(logger, install_dir: Path) -> None:
+    """Kill any leftover CloudXR runtime holding the streaming SDK port.
+
+    Only kills processes whose ``/proc/<pid>/cmdline`` mentions cloudxr or
+    isaacteleop, so an unrelated service that happens to bind 49100 is left
+    alone. SIGTERM first, then SIGKILL after a 2 s grace period. Finally
+    removes the IPC sentinel files under ``install_dir/run`` so the next
+    launch starts from a clean slate.
+    """
+    try:
+        out = subprocess.run(
+            ["lsof", "-ti", f"tcp:{_CLOUDXR_STREAMSDK_PORT}"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        pids = sorted({int(p) for p in out.stdout.split() if p.strip().isdigit()})
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pids = []
+
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmdline = f.read().replace(b"\x00", b" ").decode(errors="replace")
+        except (FileNotFoundError, PermissionError):
+            cmdline = ""
+        low = cmdline.lower()
+        if "cloudxr" not in low and "isaacteleop" not in low:
+            logger.warn(
+                f"CloudXR streaming port {_CLOUDXR_STREAMSDK_PORT} held by "
+                f"non-cloudxr pid={pid} ({cmdline[:80]!r}); leaving it alone"
+            )
+            continue
+        logger.info(f"Killing stale CloudXR runtime pid={pid}")
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        for _ in range(20):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    run_dir = install_dir / "run"
+    for name in ("ipc_cloudxr", "runtime_started", "monado.pid", "cloudxr.pid"):
+        try:
+            (run_dir / name).unlink()
+        except FileNotFoundError:
+            pass
 
 
 class TeleopRos2Node(Node):
@@ -282,7 +353,7 @@ class TeleopRos2Node(Node):
         pose_msg.pose.orientation.w = 1.0
         self._pub_root_pose.publish(pose_msg)
 
-    def run(self) -> int:
+    def _run_teleop_loop(self) -> int:
         while rclpy.ok():
             try:
                 with TeleopSession(self._config) as session:
@@ -316,6 +387,48 @@ class TeleopRos2Node(Node):
                 time.sleep(2.0)
 
         return 0
+
+    def _start_cloudxr(self) -> CloudXRLauncher | None:
+        """Spawn the CloudXR runtime + WSS proxy via :class:`CloudXRLauncher`.
+
+        Returns ``None`` when ``cloudxr_enable`` is false (e.g. MCAP replay or
+        an externally-managed runtime such as ``run_cloudxr_via_docker.sh``);
+        otherwise blocks until the runtime signals readiness (~10 s).
+        """
+        if not self._params.cloudxr_enable:
+            return None
+
+        install_dir = Path(
+            os.path.expandvars(os.path.expanduser(self._params.cloudxr_install_dir))
+        )
+        _kill_zombie_cloudxr_runtime(self.get_logger(), install_dir)
+
+        self.get_logger().info(
+            f"Starting CloudXR runtime via CloudXRLauncher (install_dir={install_dir})"
+        )
+        return CloudXRLauncher(
+            install_dir=str(install_dir),
+            env_config=self._params.cloudxr_env_config,
+            accept_eula=self._params.cloudxr_accept_eula,
+            setup_oob=self._params.cloudxr_use_adb,
+            usb_local=self._params.cloudxr_use_adb,
+        )
+
+    def _stop_cloudxr(self, launcher: CloudXRLauncher) -> None:
+        """Stop the launcher and log instead of raising on shutdown failures."""
+        try:
+            launcher.stop()
+        except Exception as e:
+            self.get_logger().error(f"CloudXRLauncher.stop() failed: {e}")
+
+    def run(self) -> int:
+        with ExitStack() as stack:
+            cloudxr_launcher = self._start_cloudxr()
+            if cloudxr_launcher is not None:
+                # ExitStack.callback runs on normal exit *and* on exception,
+                # mirroring the try/finally in isaac_teleop_server.activate().
+                stack.callback(self._stop_cloudxr, cloudxr_launcher)
+            return self._run_teleop_loop()
 
 
 def main() -> int:

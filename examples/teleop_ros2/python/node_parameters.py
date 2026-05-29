@@ -57,6 +57,129 @@ class NodeParameters:
     transform_rotation: Rotation | None
     left_finger_joint_name_aliases: list[str] | None
     right_finger_joint_name_aliases: list[str] | None
+    cloudxr_enable: bool
+    cloudxr_install_dir: str
+    cloudxr_env_config: str | None
+    cloudxr_accept_eula: bool
+    cloudxr_use_adb: bool
+
+
+def _load_cloudxr(
+    node: Node, session_mode: SessionMode
+) -> tuple[bool, str, str | None, bool, bool]:
+    """Declare and resolve the CloudXRLauncher parameters.
+
+    When ``session_mode`` is :class:`SessionMode.REPLAY` the launcher is force-
+    disabled regardless of ``cloudxr_enable``, because MCAP replay does not
+    touch OpenXR/CloudXR at all.
+    """
+    node.declare_parameter(
+        "cloudxr_enable",
+        True,
+        ParameterDescriptor(
+            description=(
+                "Launch the CloudXR runtime in-process via "
+                "isaacteleop.cloudxr.CloudXRLauncher. Set to false when "
+                "CloudXR is started separately (e.g. via "
+                "scripts/run_cloudxr_via_docker.sh) so the ROS node only "
+                "connects to the existing OpenXR runtime."
+            )
+        ),
+    )
+    node.declare_parameter(
+        "cloudxr_install_dir",
+        "~/.cloudxr",
+        ParameterDescriptor(
+            description=(
+                "CloudXR install/volume directory used by CloudXRLauncher to "
+                "locate native libraries, runtime sockets, and log files. "
+                "Tilde and environment variables are expanded by the launcher."
+            )
+        ),
+    )
+    node.declare_parameter(
+        "cloudxr_env_config",
+        "",
+        ParameterDescriptor(
+            description=(
+                "Optional path to a KEY=value env file forwarded to "
+                "CloudXRLauncher. Empty means use the launcher's built-in "
+                "defaults (NV_CXR_ENABLE_PUSH_DEVICES=true, "
+                "NV_CXR_ENABLE_TENSOR_DATA=true, NV_DEVICE_PROFILE=auto-webrtc)."
+            )
+        ),
+    )
+    node.declare_parameter(
+        "cloudxr_accept_eula",
+        False,
+        ParameterDescriptor(
+            description=(
+                "Accept the NVIDIA CloudXR EULA non-interactively on first "
+                "launch. When false, the launcher prompts on stdin if the "
+                "EULA marker is missing."
+            )
+        ),
+    )
+    node.declare_parameter(
+        "cloudxr_use_adb",
+        False,
+        ParameterDescriptor(
+            description=(
+                "Enable OOB hub + USB-local (adb reverse) routing in the WSS "
+                "proxy so a USB-tethered headset can reach CloudXR over the "
+                "loopback interface. Requires adb on PATH."
+            )
+        ),
+    )
+
+    requested_enable = (
+        node.get_parameter("cloudxr_enable").get_parameter_value().bool_value
+    )
+    cloudxr_install_dir = (
+        node.get_parameter("cloudxr_install_dir")
+        .get_parameter_value()
+        .string_value.strip()
+    )
+    if not cloudxr_install_dir:
+        raise ValueError("Parameter 'cloudxr_install_dir' must not be empty")
+    cloudxr_env_config_str = (
+        node.get_parameter("cloudxr_env_config")
+        .get_parameter_value()
+        .string_value.strip()
+    )
+    cloudxr_env_config = cloudxr_env_config_str or None
+    cloudxr_accept_eula = (
+        node.get_parameter("cloudxr_accept_eula").get_parameter_value().bool_value
+    )
+    cloudxr_use_adb = (
+        node.get_parameter("cloudxr_use_adb").get_parameter_value().bool_value
+    )
+
+    cloudxr_enable = requested_enable and session_mode != SessionMode.REPLAY
+    if requested_enable and not cloudxr_enable:
+        node.get_logger().info(
+            "CloudXR launcher disabled: MCAP replay does not require a live "
+            "CloudXR runtime."
+        )
+    elif cloudxr_enable:
+        node.get_logger().info(
+            f"CloudXR launcher enabled: install_dir={cloudxr_install_dir} "
+            f"env_config={cloudxr_env_config or '(defaults)'} "
+            f"accept_eula={cloudxr_accept_eula} use_adb={cloudxr_use_adb}"
+        )
+    else:
+        node.get_logger().info(
+            "CloudXR launcher disabled; expecting CloudXR to be started "
+            "externally."
+        )
+
+    return (
+        cloudxr_enable,
+        cloudxr_install_dir,
+        cloudxr_env_config,
+        cloudxr_accept_eula,
+        cloudxr_use_adb,
+    )
 
 
 def _load_config_asset_root(node: Node) -> Path:
@@ -361,6 +484,13 @@ def create_node_parameters(node: Node) -> NodeParameters:
     transform_rotation = _load_transform_rotation(node)
     left_finger_joint_name_aliases = _load_finger_joint_name_aliases(node, "left")
     right_finger_joint_name_aliases = _load_finger_joint_name_aliases(node, "right")
+    (
+        cloudxr_enable,
+        cloudxr_install_dir,
+        cloudxr_env_config,
+        cloudxr_accept_eula,
+        cloudxr_use_adb,
+    ) = _load_cloudxr(node, session_mode)
 
     return NodeParameters(
         mode=mode,
@@ -379,4 +509,9 @@ def create_node_parameters(node: Node) -> NodeParameters:
         transform_rotation=transform_rotation,
         left_finger_joint_name_aliases=left_finger_joint_name_aliases,
         right_finger_joint_name_aliases=right_finger_joint_name_aliases,
+        cloudxr_enable=cloudxr_enable,
+        cloudxr_install_dir=cloudxr_install_dir,
+        cloudxr_env_config=cloudxr_env_config,
+        cloudxr_accept_eula=cloudxr_accept_eula,
+        cloudxr_use_adb=cloudxr_use_adb,
     )

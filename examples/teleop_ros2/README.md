@@ -7,17 +7,49 @@ SPDX-License-Identifier: Apache-2.0
 
 Reference ROS 2 publisher for Isaac Teleop data.
 
-## Prerequisite: Start CloudXR Runtime
+## CloudXR Runtime
 
-Before running this ROS 2 reference publisher, start the CloudXR runtime via Docker (see the `README.md` setup flow, step "Run CloudXR"):
+`teleop_ros2_node.py` starts the CloudXR runtime in-process via
+`isaacteleop.cloudxr.CloudXRLauncher` (the same launcher used by
+`groot.control.teleop.device.isaac_teleop_server`). The runtime is started
+before the OpenXR session and torn down on shutdown, so no separate
+`./scripts/run_cloudxr_via_docker.sh` step is required.
 
-1. To use optical hand tracking from the XR device, create a CloudXR environment file `deps/cloudxr/.env` (if missing) with:
+Relevant ROS 2 parameters:
+
+- `cloudxr_enable` (default `true`): disable to skip the in-process launcher
+  when CloudXR is started separately (e.g. via
+  `./scripts/run_cloudxr_via_docker.sh`). The launcher is also auto-disabled
+  when `mcap_replay_path` is set, since MCAP replay does not touch OpenXR.
+- `cloudxr_install_dir` (default `~/.cloudxr`): CloudXR install/volume
+  directory.
+- `cloudxr_env_config` (default empty): optional path to a KEY=value env file
+  applied to CloudXR (e.g. to set `NV_CXR_ENABLE_PUSH_DEVICES=0` for native
+  hand tracking).
+- `cloudxr_accept_eula` (default `false`): accept the NVIDIA CloudXR EULA
+  non-interactively. Required when running detached or inside containers that
+  cannot prompt on stdin.
+- `cloudxr_use_adb` (default `false`): enable the OOB hub + USB-local
+  (`adb reverse`) routing in the WSS proxy, mirroring the
+  `IsaacTeleopServer --use-adb` option for USB-tethered headsets.
+
+Example (interactive, accepts EULA up front):
+
+```bash
+ros2 run teleop_ros2 teleop_ros2_node --ros-args \
+  -p cloudxr_accept_eula:=true
+```
+
+To opt out of the embedded launcher and keep the previous workflow of
+launching CloudXR in a dedicated container, pass `cloudxr_enable:=false` and
+start CloudXR yourself. To enable native hand tracking from the XR device in
+that scenario, create `deps/cloudxr/.env` (if missing) with:
 
 ```bash
 NV_CXR_ENABLE_PUSH_DEVICES=0
 ```
 
-1. Start CloudXR:
+then start CloudXR:
 
 ```bash
 ./scripts/run_cloudxr_via_docker.sh
@@ -110,7 +142,10 @@ Incremental rebuilds use Docker BuildKit cache. Ensure BuildKit is enabled (defa
 
 ### Run the container
 
-Use host networking (recommended for ROS 2 DDS):
+Use host networking (recommended for ROS 2 DDS). The example below keeps the
+existing "CloudXR runs in a separate container via `run_cloudxr_via_docker.sh`"
+workflow, so the embedded launcher is disabled with `cloudxr_enable:=false`:
+
 ```bash
 source scripts/setup_cloudxr_env.sh
 docker run --rm --net=host --ipc=host \
@@ -118,7 +153,18 @@ docker run --rm --net=host --ipc=host \
   -e ROS_LOCALHOST_ONLY=1 \
   -v $CXR_HOST_VOLUME_PATH:$CXR_HOST_VOLUME_PATH:ro \
   --name teleop_ros2_ref \
-  teleop_ros2_ref
+  teleop_ros2_ref --ros-args -p cloudxr_enable:=false
+```
+
+To instead run the embedded launcher inside the same container, attach the
+GPU, mount the install dir read-write, and accept the EULA non-interactively:
+
+```bash
+docker run --rm --net=host --ipc=host --gpus all \
+  -e ROS_LOCALHOST_ONLY=1 \
+  -v $HOME/.cloudxr:/root/.cloudxr \
+  --name teleop_ros2_ref \
+  teleop_ros2_ref --ros-args -p cloudxr_accept_eula:=true
 ```
 
 ### Overriding parameters and remapping topics
@@ -131,11 +177,12 @@ docker run --rm --net=host --ipc=host \
   -e ROS_LOCALHOST_ONLY=1 \
   -v $CXR_HOST_VOLUME_PATH:$CXR_HOST_VOLUME_PATH:ro \
   --name teleop_ros2_ref \
-  teleop_ros2_ref --ros-args -p world_frame:=odom -p rate_hz:=30.0 \
+  teleop_ros2_ref --ros-args -p cloudxr_enable:=false \
+  -p world_frame:=odom -p rate_hz:=30.0 \
   -r xr_teleop/hand:=my_robot/hand -r xr_teleop/ee_poses:=my_robot/ee_poses
 ```
 
-Available parameters: `rate_hz`, `mode`, `hand_retargeter`, `config_asset_root`, `pedal_collection_id`, `world_frame`, `right_wrist_frame`, `left_wrist_frame`, `left_finger_joint_names`, `right_finger_joint_names`. Use `ros2 param list /teleop_ros2_node` and `ros2 param describe /teleop_ros2_node <param>` (with the node running) for the full set.
+Available parameters: `rate_hz`, `mode`, `hand_retargeter`, `config_asset_root`, `pedal_collection_id`, `world_frame`, `right_wrist_frame`, `left_wrist_frame`, `left_finger_joint_names`, `right_finger_joint_names`, `cloudxr_enable`, `cloudxr_install_dir`, `cloudxr_env_config`, `cloudxr_accept_eula`, `cloudxr_use_adb`. Use `ros2 param list /teleop_ros2_node` and `ros2 param describe /teleop_ros2_node <param>` (with the node running) for the full set.
 
 By default, `left_finger_joint_names` and `right_finger_joint_names` use the selected mode's retargeter joint names. They can be overridden to publish robot-specific names on `xr_teleop/finger_joints`, but each override must provide the same number of names as the joints emitted by that mode's retargeter.
 
