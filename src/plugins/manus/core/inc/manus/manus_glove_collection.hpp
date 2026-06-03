@@ -3,8 +3,6 @@
 
 #pragma once
 
-#include <cstddef>
-
 namespace plugins
 {
 namespace manus
@@ -16,13 +14,13 @@ namespace manus
 // isaacteleop.haptic_devices.glove.haptic_glove_device factory and the
 // haptic_feedback example). Whatever consumer the app wires must pass this
 // same collection_id string so the runtime pairs them by name.
+//
+// The per-sample buffer size is deliberately NOT configured here: the reader
+// (HapticCommandReaderTracker) and the producer (TensorPushTracker) share the
+// same DEFAULT_MAX_PAYLOAD_SIZE, so both sides agree without a Manus-specific
+// constant that could drift below the producer's collection size (the reader
+// rejects a collection whose sample size exceeds its buffer).
 inline constexpr const char* MANUS_GLOVE_COLLECTION_ID = "manus_glove_haptic";
-
-// A HapticCommand carries an endpoint string ("left"/"right") plus a
-// 5-finger values vector; serialised it is ~64 B. 128 leaves headroom for
-// the longer endpoint names and FlatBuffer padding without bloating
-// per-collection storage.
-inline constexpr std::size_t MANUS_GLOVE_MAX_PAYLOAD_SIZE = 128;
 
 } // namespace manus
 } // namespace plugins

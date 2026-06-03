@@ -5,14 +5,15 @@
 
 #include <deviceio_base/tensor_push_tracker_base.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
 namespace core
 {
 
-// Replay has no peer to push to; mirrors ReplayMessageChannelTrackerImpl::send_message
-// (logs and drops the payload rather than throwing).
+// Replay has no peer to push to, so pushes are dropped. Push happens per
+// frame, so the drop is logged only once to avoid flooding the console.
 class ReplayTensorPushTrackerImpl : public ITensorPushTrackerImpl
 {
 public:
@@ -20,6 +21,9 @@ public:
 
     void update(int64_t monotonic_time_ns) override;
     void push(const std::vector<uint8_t>& payload) const override;
+
+private:
+    mutable std::atomic<bool> m_drop_logged{ false };
 };
 
 } // namespace core

@@ -29,8 +29,8 @@ SchemaTrackerConfig make_haptic_command_reader_config(const HapticCommandReaderT
 
 } // namespace
 
-LiveHapticCommandReaderTrackerImpl::LiveHapticCommandReaderTrackerImpl(
-    const OpenXRSessionHandles& handles, const HapticCommandReaderTracker* tracker)
+LiveHapticCommandReaderTrackerImpl::LiveHapticCommandReaderTrackerImpl(const OpenXRSessionHandles& handles,
+                                                                       const HapticCommandReaderTracker* tracker)
     : schema_reader_(handles, make_haptic_command_reader_config(tracker), /*mcap_channels=*/nullptr)
 {
 }

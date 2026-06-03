@@ -32,6 +32,11 @@ namespace plugins
 namespace manus
 {
 
+// Manus haptic gloves expose exactly five finger motors; the SDK's
+// CoreSdk_VibrateFingersForGlove takes a fixed powers[5]. A glove with a
+// different actuator count would change this and the values it consumes.
+inline constexpr std::size_t kManusFingerCount = 5;
+
 class __attribute__((visibility("default"))) ManusTracker
 {
 public:
@@ -55,7 +60,7 @@ public:
     /// returns a non-success code.
     ///
     /// Thread-safe — `landscape_mutex` guards the per-side glove id.
-    void apply_haptic_command(bool is_left, const std::array<float, 5>& powers);
+    void apply_haptic_command(bool is_left, const std::array<float, kManusFingerCount>& powers);
 
 private:
     // Lifecycle
@@ -113,7 +118,7 @@ private:
     std::shared_ptr<core::ControllerTracker> m_controller_tracker;
     std::shared_ptr<core::HandTracker> m_hand_tracker;
     // Inbound HapticCommand tensor; collection identity in
-    // inc/manus/manus_glove_collection.hpp. Drained in update().
+    // inc/manus/manus_glove_collection.hpp. Read each frame in update().
     std::shared_ptr<core::HapticCommandReaderTracker> m_haptic_reader;
     std::unique_ptr<core::DeviceIOSession> m_deviceio_session;
 

@@ -9,9 +9,7 @@
 namespace core
 {
 
-TensorPushTracker::TensorPushTracker(std::string collection_id,
-                                     std::string tensor_identifier,
-                                     std::size_t max_payload_size)
+TensorPushTracker::TensorPushTracker(std::string collection_id, std::string tensor_identifier, std::size_t max_payload_size)
     : collection_id_(std::move(collection_id)),
       tensor_identifier_(std::move(tensor_identifier)),
       max_payload_size_(max_payload_size)

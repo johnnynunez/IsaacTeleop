@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#include "inc/manus/manus_glove_collection.hpp"
 #include "inc/manus/manus_hand_tracking_plugin.hpp"
+
+#include "inc/manus/manus_glove_collection.hpp"
 
 #include <oxr/oxr_session.hpp>
 #include <oxr_utils/math.hpp>
@@ -90,11 +91,11 @@ void ManusTracker::update()
     if (m_haptic_reader)
     {
         const auto& tracked = m_haptic_reader->get_data(*m_deviceio_session);
-        if (tracked.data && tracked.data->values.size() == 5 &&
+        if (tracked.data && tracked.data->values.size() == kManusFingerCount &&
             (tracked.data->endpoint == "left" || tracked.data->endpoint == "right"))
         {
-            std::array<float, 5> powers{};
-            for (size_t i = 0; i < 5; ++i)
+            std::array<float, kManusFingerCount> powers{};
+            for (size_t i = 0; i < kManusFingerCount; ++i)
             {
                 powers[i] = tracked.data->values[i];
             }
@@ -129,7 +130,7 @@ std::vector<NodeInfo> ManusTracker::get_right_node_info() const
     return m_right_node_info;
 }
 
-void ManusTracker::apply_haptic_command(bool is_left, const std::array<float, 5>& powers)
+void ManusTracker::apply_haptic_command(bool is_left, const std::array<float, kManusFingerCount>& powers)
 {
     uint32_t glove_id = 0;
     {
@@ -149,7 +150,7 @@ void ManusTracker::apply_haptic_command(bool is_left, const std::array<float, 5>
     // Clamp to [0, 1] — the Manus SDK does the same internally but
     // documenting the contract here lets retargeters with looser saturation
     // bounds wire up safely.
-    std::array<float, 5> clamped{};
+    std::array<float, kManusFingerCount> clamped{};
     for (size_t i = 0; i < clamped.size(); ++i)
     {
         clamped[i] = std::clamp(powers[i], 0.0f, 1.0f);
@@ -246,9 +247,11 @@ void ManusTracker::initialize(const std::string& app_name) noexcept(false)
 
         // Registering the reader pulls XR_NVX1_tensor_data into the
         // OpenXRSession's required-extension set; the session will fail
-        // loudly on a runtime that doesn't advertise it.
-        m_haptic_reader = std::make_shared<core::HapticCommandReaderTracker>(MANUS_GLOVE_COLLECTION_ID,
-                                                                             MANUS_GLOVE_MAX_PAYLOAD_SIZE);
+        // loudly on a runtime that doesn't advertise it. The reader's buffer
+        // must be >= the producer's collection sample size; we use the shared
+        // default (matching the producer's PushTensorHapticDevice) rather than
+        // a Manus-specific size that could drift below it.
+        m_haptic_reader = std::make_shared<core::HapticCommandReaderTracker>(MANUS_GLOVE_COLLECTION_ID);
         trackers.push_back(m_haptic_reader);
 
         // Get required extensions from trackers

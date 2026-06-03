@@ -11,8 +11,8 @@
 namespace core
 {
 
-// v1 does not record haptic commands to MCAP, so replay always returns
-// empty tracked data (data == nullptr).
+// Haptic commands are not recorded to MCAP, so replay always returns empty
+// tracked data (data == nullptr).
 class ReplayHapticCommandReaderTrackerImpl : public IHapticCommandReaderTrackerImpl
 {
 public:

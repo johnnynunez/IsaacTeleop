@@ -23,8 +23,9 @@ table HapticCommandTracked {
     data: HapticCommand (id: 0);
 }
 
-// MCAP recording wrapper; required by SchemaTracker<RecordT, DataTableT>
-// even though v1 disables recording (live reader passes mcap_channels=nullptr).
+// MCAP recording wrapper required by the SchemaTracker<RecordT, DataTableT>
+// template. Recording is disabled here -- the live reader passes
+// mcap_channels=nullptr.
 table HapticCommandRecord {
     data: HapticCommand (id: 0);
     timestamp: DeviceDataTimestamp (id: 1);

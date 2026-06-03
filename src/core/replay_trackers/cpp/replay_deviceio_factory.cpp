@@ -81,7 +81,8 @@ std::unique_ptr<ITrackerImpl> try_create_tensor_push_impl(ReplayDeviceIOFactory&
     return typed ? factory.create_tensor_push_tracker_impl(typed) : nullptr;
 }
 
-std::unique_ptr<ITrackerImpl> try_create_haptic_command_reader_impl(ReplayDeviceIOFactory& factory, const ITracker& tracker)
+std::unique_ptr<ITrackerImpl> try_create_haptic_command_reader_impl(ReplayDeviceIOFactory& factory,
+                                                                    const ITracker& tracker)
 {
     auto* typed = dynamic_cast<const HapticCommandReaderTracker*>(&tracker);
     return typed ? factory.create_haptic_command_reader_tracker_impl(typed) : nullptr;

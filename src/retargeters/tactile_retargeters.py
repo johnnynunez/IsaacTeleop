@@ -513,7 +513,7 @@ class TactileHeatmapToWristPulse(BaseRetargeter):
     Outputs:
         - ``"power"``: :func:`FingerPowerVector(1) <isaacteleop.retargeting_engine.tensor_types.FingerPowerVector>`
           (single-channel power; reused here for wrist-only devices to avoid
-          introducing a v1 schema with no concrete consumer).
+          introducing a schema with no concrete consumer).
 
     Reduction is over the entire ``(num_pads, rows, cols)`` array via
     ``"max"``, ``"mean"``, or ``"sum"``. Standard gain / deadband / saturation

@@ -160,8 +160,8 @@ def EndEffectorForce() -> TensorGroupType:
     the :class:`HapticSink` rotate sim-frame forces into device frame via the
     optional ``world_T_haptic`` ValueInput leaf and :class:`Vector3FrameTransform`.
 
-    Shipped in v1 (no v1 device consumes it) so the schema set is stable when
-    the Haply force-feedback adapter lands.
+    Shipped even though no current device consumes it, so the schema set is
+    stable when the Haply force-feedback adapter lands.
     """
     return TensorGroupType(
         "end_effector_force",

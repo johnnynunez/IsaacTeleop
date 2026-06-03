@@ -29,8 +29,7 @@ public:
         return SchemaTrackerBase::get_required_extensions();
     }
 
-    LiveHapticCommandReaderTrackerImpl(const OpenXRSessionHandles& handles,
-                                       const HapticCommandReaderTracker* tracker);
+    LiveHapticCommandReaderTrackerImpl(const OpenXRSessionHandles& handles, const HapticCommandReaderTracker* tracker);
 
     LiveHapticCommandReaderTrackerImpl(const LiveHapticCommandReaderTrackerImpl&) = delete;
     LiveHapticCommandReaderTrackerImpl& operator=(const LiveHapticCommandReaderTrackerImpl&) = delete;
