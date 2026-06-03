@@ -442,6 +442,19 @@ pip<span class="w"> </span>install<span class="w"> </span><span class="s1">&#39;
 </div>
 <p>Instead of installing the package from PyPI, you can build from source and install the local wheel.
 See <a class="reference internal" href="build_from_source/index.html"><span class="doc">Build from Source</span></a> for more details.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><strong>ARM64 / aarch64 systems only</strong> (e.g. NVIDIA DGX Spark): PyPI does not publish pre-built
+<code class="docutils literal notranslate"><span class="pre">nlopt</span></code> wheels for ARM64, so the <code class="docutils literal notranslate"><span class="pre">retargeters</span></code> extra cannot be installed directly from PyPI
+(see <a class="reference external" href="https://github.com/NVIDIA/IsaacTeleop/issues/452" rel="noopener noreferrer" target="_blank">issue #452</a>). Follow the
+<a class="reference internal" href="build_from_source/index.html#aarch64-nlopt-wheel"><span class="std std-ref">aarch64 nlopt wheel build steps</span></a> from the build-from-source guide
+first, then install <code class="docutils literal notranslate"><span class="pre">isaacteleop</span></code> with an additional <code class="docutils literal notranslate"><span class="pre">--find-links</span></code>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>pip<span class="w"> </span>install<span class="w"> </span><span class="s1">&#39;isaacteleop[cloudxr,retargeters]~=1.0.0&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--extra-index-url<span class="w"> </span>https://pypi.nvidia.com<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--find-links<span class="o">=</span>/tmp/nlopt-wheels/
+</pre></div>
+</div>
+</div>
 </section>
 <section id="run-cloudxr-server">
 <span id="id1"></span><h2><a class="toc-backref" href="#id10" role="doc-backlink">3. Run CloudXR Server</a><a class="headerlink" href="#run-cloudxr-server" title="Link to this heading">#</a></h2>
