@@ -289,6 +289,10 @@ class TestTactileHeatmapToFingerPower:
         assert powers[1] == pytest.approx(0.3)
         assert powers[2] == pytest.approx(0.5)
 
+    def test_rejects_nonpositive_dimensions(self) -> None:
+        with pytest.raises(ValueError, match="rows/cols/num_pads"):
+            TactileHeatmapToFingerPower("heat_fp", rows=0, cols=2, num_pads=5)
+
 
 class TestTactileHeatmapToWristPulse:
     def test_collapses_to_single_channel(self) -> None:
@@ -298,6 +302,10 @@ class TestTactileHeatmapToWristPulse:
         power = np.asarray(outputs["power"][0])
         assert power.shape == (1,)
         assert float(power[0]) == pytest.approx(0.8)
+
+    def test_rejects_nonpositive_dimensions(self) -> None:
+        with pytest.raises(ValueError, match="rows/cols/num_pads"):
+            TactileHeatmapToWristPulse("wrist", rows=2, cols=0, num_pads=1)
 
 
 class TestFingerPowerToControllerPulse:

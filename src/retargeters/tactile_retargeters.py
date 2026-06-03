@@ -417,6 +417,11 @@ class TactileHeatmapToFingerPower(BaseRetargeter):
         saturation: float = 1.0,
         smoothing: float = 1.0,
     ) -> None:
+        if rows < 1 or cols < 1 or num_pads < 1:
+            raise ValueError(
+                f"TactileHeatmapToFingerPower '{name}' requires rows/cols/num_pads >= 1, "
+                f"got rows={rows}, cols={cols}, num_pads={num_pads}"
+            )
         if reduction not in ("max", "mean", "sum"):
             raise ValueError(
                 f"TactileHeatmapToFingerPower '{name}': unknown reduction '{reduction}'"
@@ -535,6 +540,11 @@ class TactileHeatmapToWristPulse(BaseRetargeter):
         saturation: float = 1.0,
         smoothing: float = 1.0,
     ) -> None:
+        if rows < 1 or cols < 1 or num_pads < 1:
+            raise ValueError(
+                f"TactileHeatmapToWristPulse '{name}' requires rows/cols/num_pads >= 1, "
+                f"got rows={rows}, cols={cols}, num_pads={num_pads}"
+            )
         if reduction not in ("max", "mean", "sum"):
             raise ValueError(
                 f"TactileHeatmapToWristPulse '{name}': unknown reduction '{reduction}'"

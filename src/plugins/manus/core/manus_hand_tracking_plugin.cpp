@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -153,7 +154,9 @@ void ManusTracker::apply_haptic_command(bool is_left, const std::array<float, kM
     std::array<float, kManusFingerCount> clamped{};
     for (size_t i = 0; i < clamped.size(); ++i)
     {
-        clamped[i] = std::clamp(powers[i], 0.0f, 1.0f);
+        // std::clamp passes NaN / ±Inf through unchanged, so sanitize first --
+        // a non-finite power must never reach the SDK.
+        clamped[i] = std::isfinite(powers[i]) ? std::clamp(powers[i], 0.0f, 1.0f) : 0.0f;
     }
 
     const SDKReturnCode rc = CoreSdk_VibrateFingersForGlove(glove_id, clamped.data());
