@@ -331,6 +331,60 @@ def compute_layers(graph: Graph) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
+def _barycenter_order(
+    by_layer: dict[int, list[str]],
+    deps: dict[str, set[str]],
+    max_iter: int = 4,
+) -> dict[int, list[str]]:
+    """Reorder nodes within each layer using the barycenter crossing-minimisation heuristic.
+
+    Alternates downward sweeps (each layer reordered by the positions of its consumers in
+    the layer above) and upward sweeps (reordered by the positions of its dependencies in
+    the layer below). Nodes with no neighbours in the fixed adjacent layer are sorted last
+    in stable order so they do not displace constrained nodes.
+    """
+    max_lyr = max(by_layer)
+
+    # consumers[v] = nodes in higher layers that directly depend on v
+    consumers: dict[str, set[str]] = {
+        n: set() for nodes in by_layer.values() for n in nodes
+    }
+    for u, vs in deps.items():
+        if u not in consumers:
+            continue
+        for v in vs:
+            if v in consumers:
+                consumers[v].add(u)
+
+    order: dict[int, list[str]] = {lyr: list(nodes) for lyr, nodes in by_layer.items()}
+
+    def _reorder(
+        lyr: int, nbr_map: dict[str, set[str]], fixed_pos: dict[str, float]
+    ) -> None:
+        def key(item: tuple[int, str]) -> tuple[float, int]:
+            i, node = item
+            nbrs = [fixed_pos[nb] for nb in nbr_map[node] if nb in fixed_pos]
+            return (sum(nbrs) / len(nbrs) if nbrs else float("inf"), i)
+
+        order[lyr] = [n for _, n in sorted(enumerate(order[lyr]), key=key)]
+
+    for _ in range(max_iter):
+        # Downward sweep: top → bottom, fix upper layer, reorder by consumer positions
+        for lyr in range(max_lyr - 1, -1, -1):
+            if lyr + 1 not in order:
+                continue
+            pos = {n: float(i) for i, n in enumerate(order[lyr + 1])}
+            _reorder(lyr, consumers, pos)
+        # Upward sweep: bottom → top, fix lower layer, reorder by dependency positions
+        for lyr in range(1, max_lyr + 1):
+            if lyr - 1 not in order:
+                continue
+            pos = {n: float(i) for i, n in enumerate(order[lyr - 1])}
+            _reorder(lyr, deps, pos)
+
+    return order
+
+
 def _display_name(canonical: str, aliases: set[str]) -> str:
     """Return the best human-readable name for a node.
 
@@ -378,6 +432,7 @@ def render_generated_block(
     by_layer: dict[int, list[str]] = {}
     for n in names:
         by_layer.setdefault(layer[n], []).append(n)
+    by_layer = _barycenter_order(by_layer, graph.deps)
 
     lines: list[str] = [BEGIN_MARKER, ""]
     lines.extend(

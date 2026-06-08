@@ -38,13 +38,15 @@ other and dependencies always point to lower layers.
 %%{init: {"flowchart": {"rankSpacing": 120}, "themeVariables": {"fontSize": "24pt"}} }%%
 flowchart TD
   subgraph LYR7["Layer 7 - top (consumers)"]
-    n13[["deviceio_session_py"]]
     n53(["viz_layers_tests"])
     n56(["viz_session_tests"])
+    n13[["deviceio_session_py"]]
   end
   subgraph LYR6["Layer 6"]
-    n8(["controller_synthetic_hands"])
+    n52["viz::layers_testing"]
+    n54[["viz_py"]]
     n11{{"deviceio::deviceio_py_utils"}}
+    n8(["controller_synthetic_hands"])
     n18(["frame_metadata_printer"])
     n29(["mcap_tests"])
     n33(["oxr_session_sharing"])
@@ -52,70 +54,68 @@ flowchart TD
     n36(["pedal_printer"])
     n41(["replay_deviceio_session_tests"])
     n48(["teleop_ros2_mcap_generator"])
-    n52["viz::layers_testing"]
-    n54[["viz_py"]]
   end
   subgraph LYR5["Layer 5"]
-    n12["deviceio::deviceio_session"]
     n51["viz::layers"]
+    n12["deviceio::deviceio_session"]
   end
   subgraph LYR4["Layer 4"]
-    n15[["deviceio_trackers_py"]]
-    n25["deviceio::live_trackers"]
-    n42["deviceio::replay_trackers"]
-    n50(["viz_core_tests"])
     n55["viz::session"]
     n61(["viz_xr_tests"])
+    n50(["viz_core_tests"])
+    n25["deviceio::live_trackers"]
+    n42["deviceio::replay_trackers"]
+    n15[["deviceio_trackers_py"]]
   end
   subgraph LYR3["Layer 3"]
     n7(["camera_plugin_oak"])
-    n14["deviceio::deviceio_trackers"]
     n19(["generic_3axis_pedal_plugin"])
-    n32[["oxr_py"]]
     n37(["pedal_pusher"])
-    n59{{"viz::test_support"}}
+    n32[["oxr_py"]]
     n60["viz::xr"]
+    n59{{"viz::test_support"}}
     n62(["xdev_list"])
+    n14["deviceio::deviceio_trackers"]
   end
   subgraph LYR2["Layer 2"]
     n9["depthai::core"]
-    n10{{"deviceio::deviceio_base"}}
-    n16["examples_common"]
-    n27{{"mcap::mcap_core"}}
-    n31["oxr::oxr_core"]
-    n38[["plugin_manager_py"]]
     n39["pusherio::pusherio"]
-    n43[["schema_py"]]
-    n44(["schema_tests"])
+    n31["oxr::oxr_core"]
     n47["Teleop::plugin_utils"]
     n49["viz::core"]
+    n16["examples_common"]
+    n10{{"deviceio::deviceio_base"}}
+    n27{{"mcap::mcap_core"}}
+    n43[["schema_py"]]
+    n44(["schema_tests"])
+    n38[["plugin_manager_py"]]
     n58(["viz_shaders_tests"])
   end
   subgraph LYR1["Layer 1"]
-    n1["Catch2::Catch2WithMain"]
     n4["XLink"]
     n6["archive_static"]
-    n20["glfw"]
-    n23{{"isaacteleop_schema"}}
-    n30["OpenXR::openxr_loader"]
     n35{{"oxr::oxr_utils"}}
+    n30["OpenXR::openxr_loader"]
+    n23{{"isaacteleop_schema"}}
+    n20["glfw"]
     n46["teleop_plugin_manager"]
+    n1["Catch2::Catch2WithMain"]
   end
   subgraph LYR0["Layer 0 - foundation"]
+    n5{{"XLinkPublic"}}
+    n26["lzma::lzma"]
+    n22{{"OpenXR::headers"}}
+    n17["flatbuffers"]
+    n3{{"Threads::Threads"}}
+    n63["yaml-cpp::yaml-cpp"]
     n0["Catch2::Catch2"]
     n2["SDL2::SDL2-static"]
-    n3{{"Threads::Threads"}}
-    n5{{"XLinkPublic"}}
-    n17["flatbuffers"]
     n21{{"glm::glm"}}
-    n22{{"OpenXR::headers"}}
     n24{{"libnop"}}
-    n26["lzma::lzma"]
     n28{{"mcap::mcap"}}
     n40{{"pybind11::module"}}
     n45{{"Teleop::openxr_extensions"}}
     n57{{"viz::shaders"}}
-    n63["yaml-cpp::yaml-cpp"]
   end
   n1 --> n0
   n4 --> n5
@@ -230,14 +230,14 @@ flowchart TD
 
 | Layer | Targets |
 | ----: | ------- |
-| 7 | `deviceio_session_py`, `viz_layers_tests`, `viz_session_tests` |
-| 6 | `controller_synthetic_hands`, `deviceio::deviceio_py_utils`, `frame_metadata_printer`, `mcap_tests`, `oxr_session_sharing`, `oxr_simple_api_demo`, `pedal_printer`, `replay_deviceio_session_tests`, `teleop_ros2_mcap_generator`, `viz::layers_testing`, `viz_py` |
-| 5 | `deviceio::deviceio_session`, `viz::layers` |
-| 4 | `deviceio_trackers_py`, `deviceio::live_trackers`, `deviceio::replay_trackers`, `viz_core_tests`, `viz::session`, `viz_xr_tests` |
-| 3 | `camera_plugin_oak`, `deviceio::deviceio_trackers`, `generic_3axis_pedal_plugin`, `oxr_py`, `pedal_pusher`, `viz::test_support`, `viz::xr`, `xdev_list` |
-| 2 | `depthai::core`, `deviceio::deviceio_base`, `examples_common`, `mcap::mcap_core`, `oxr::oxr_core`, `plugin_manager_py`, `pusherio::pusherio`, `schema_py`, `schema_tests`, `Teleop::plugin_utils`, `viz::core`, `viz_shaders_tests` |
-| 1 | `Catch2::Catch2WithMain`, `XLink`, `archive_static`, `glfw`, `isaacteleop_schema`, `OpenXR::openxr_loader`, `oxr::oxr_utils`, `teleop_plugin_manager` |
-| 0 | `Catch2::Catch2`, `SDL2::SDL2-static`, `Threads::Threads`, `XLinkPublic`, `flatbuffers`, `glm::glm`, `OpenXR::headers`, `libnop`, `lzma::lzma`, `mcap::mcap`, `pybind11::module`, `Teleop::openxr_extensions`, `viz::shaders`, `yaml-cpp::yaml-cpp` |
+| 7 | `viz_layers_tests`, `viz_session_tests`, `deviceio_session_py` |
+| 6 | `viz::layers_testing`, `viz_py`, `deviceio::deviceio_py_utils`, `controller_synthetic_hands`, `frame_metadata_printer`, `mcap_tests`, `oxr_session_sharing`, `oxr_simple_api_demo`, `pedal_printer`, `replay_deviceio_session_tests`, `teleop_ros2_mcap_generator` |
+| 5 | `viz::layers`, `deviceio::deviceio_session` |
+| 4 | `viz::session`, `viz_xr_tests`, `viz_core_tests`, `deviceio::live_trackers`, `deviceio::replay_trackers`, `deviceio_trackers_py` |
+| 3 | `camera_plugin_oak`, `generic_3axis_pedal_plugin`, `pedal_pusher`, `oxr_py`, `viz::xr`, `viz::test_support`, `xdev_list`, `deviceio::deviceio_trackers` |
+| 2 | `depthai::core`, `pusherio::pusherio`, `oxr::oxr_core`, `Teleop::plugin_utils`, `viz::core`, `examples_common`, `deviceio::deviceio_base`, `mcap::mcap_core`, `schema_py`, `schema_tests`, `plugin_manager_py`, `viz_shaders_tests` |
+| 1 | `XLink`, `archive_static`, `oxr::oxr_utils`, `OpenXR::openxr_loader`, `isaacteleop_schema`, `glfw`, `teleop_plugin_manager`, `Catch2::Catch2WithMain` |
+| 0 | `XLinkPublic`, `lzma::lzma`, `OpenXR::headers`, `flatbuffers`, `Threads::Threads`, `yaml-cpp::yaml-cpp`, `Catch2::Catch2`, `SDL2::SDL2-static`, `glm::glm`, `libnop`, `mcap::mcap`, `pybind11::module`, `Teleop::openxr_extensions`, `viz::shaders` |
 
 ## Direct dependencies by target
 
