@@ -103,7 +103,20 @@ jobs:
         if-no-files-found: error
 
     - name: Verify committed diagram is up to date
+      id: verify-diagram
       run: |
         python3 scripts/cmake_target_layers.py \
           --dot build/cmake-target-graph.dot \
           --check
+
+    - name: Hint on stale diagram
+      if: failure() && steps.verify-diagram.conclusion == 'failure'
+      env:
+        PR_URL: ${{ github.event.pull_request.html_url }}
+      run: |
+        if [ -n "$PR_URL" ]; then
+          HINT="Comment \`/update-cmake-target-layers\` on the PR to auto-commit the refreshed diagram."
+        else
+          HINT="Download the \`cmake-target-layers\` artifact from this run and commit it in place of \`cmake/cmake-target-layers.md\`."
+        fi
+        echo "::error title=cmake-target-layers.md is stale::$HINT"
