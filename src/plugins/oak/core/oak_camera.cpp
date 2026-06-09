@@ -51,17 +51,21 @@ OakCamera::OakCamera(const OakConfig& config, const std::vector<StreamConfig>& s
 
     static constexpr const char* kPreviewStreamName = "ColorPreview";
 
-    auto pipeline = create_pipeline(config, streams, color_resolution);
+    m_pipeline.emplace(create_pipeline(config, streams, color_resolution));
 
     if (config.preview)
-        m_preview = PreviewStream::create(kPreviewStreamName, pipeline, color_resolution);
+        m_preview = PreviewStream::create(kPreviewStreamName, *m_pipeline, color_resolution);
 
-    m_device->startPipeline(pipeline);
+    m_pipeline->start();
 
     std::cout << "OAK camera pipeline started" << std::endl;
 }
 
-OakCamera::~OakCamera() = default;
+OakCamera::~OakCamera()
+{
+    if (m_pipeline && m_pipeline->isRunning())
+        m_pipeline->stop();
+}
 
 dai::DeviceInfo OakCamera::find_device(const std::string& device_id)
 {
@@ -96,7 +100,10 @@ dai::Pipeline OakCamera::create_pipeline(const OakConfig& config,
                                          const std::vector<StreamConfig>& streams,
                                          dai::ColorCameraProperties::SensorResolution color_resolution)
 {
-    dai::Pipeline pipeline;
+    // Build the pipeline on the already-opened device. Using the default
+    // dai::Pipeline ctor would create a *second* implicit device, so the output
+    // queues would bind to a device that m_device->start() never runs.
+    dai::Pipeline pipeline(m_device);
     m_queues.clear();
 
     bool need_color = has_stream(streams, core::StreamType_Color);

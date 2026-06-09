@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -98,6 +99,9 @@ private:
                                   dai::ColorCameraProperties::SensorResolution color_resolution);
 
     std::shared_ptr<dai::Device> m_device;
+    // Pipeline is built on m_device and must outlive construction: in DepthAI v3
+    // the pipeline owns the running session and feeds the output queues below.
+    std::optional<dai::Pipeline> m_pipeline;
     std::map<core::StreamType, std::shared_ptr<dai::MessageQueue>> m_queues;
 
     std::unique_ptr<FrameSink> m_sink;
