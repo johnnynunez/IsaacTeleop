@@ -423,10 +423,15 @@ def render_generated_block(
     graph: Graph, layer: dict[str, int], first_party: set[str]
 ) -> str:
     names = sorted(graph.types)
-    node_id = {name: f"n{i}" for i, name in enumerate(names)}
     disp = {
         name: _display_name(name, graph.node_aliases.get(name, set())) for name in names
     }
+    # Use the sanitized display name as the node ID so that adding or removing
+    # a target only touches lines that reference that target, not every edge.
+    raw_ids = [re.sub(r"[^A-Za-z0-9_]", "_", disp[name]) for name in names]
+    if len(set(raw_ids)) != len(raw_ids):
+        raise SystemExit("sanitized Mermaid node IDs collide; check target names")
+    node_id = dict(zip(names, raw_ids))
     max_layer = max(layer.values()) if layer else 0
     n_edges = len(graph.edges)
     by_layer: dict[int, list[str]] = {}
