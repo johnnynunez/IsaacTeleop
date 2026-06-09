@@ -20,8 +20,8 @@ concurrency:
 
 jobs:
   build-windows:
-    # Pin to windows-2022 until VS 2026 is validated.
-    runs-on: windows-2022
+    # Pin to windows-2025 (VS 2022) until VS 2026 is validated.
+    runs-on: windows-2025
 
     env:
       SCCACHE_GHA_ENABLED: "true"
