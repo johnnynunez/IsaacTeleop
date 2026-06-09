@@ -9,7 +9,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>Build System &#8212; Isaac Teleop Documentation</title>
+    <title>Egocentric Hand Reconstruction &#8212; Isaac Teleop Documentation</title>
   
   
   
@@ -51,15 +51,15 @@
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
     <script src="../_static/copybutton.js?v=f281be69"></script>
     <script src="../_static/design-tabs.js?v=f930bc37"></script>
-    <script>DOCUMENTATION_OPTIONS.pagename = 'references/build';</script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'references/egocentric_hand_reconstruction';</script>
     <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
 
     <link rel="icon" href="../_static/favicon.ico"/>
 
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="Device Interface" href="../device/index.html" />
-    <link rel="prev" title="System Requirements" href="requirements.html" />
+    <link rel="next" title="License" href="license.html" />
+    <link rel="prev" title="Out-of-Band Teleop Control" href="oob_teleop_control.html" />
 
 
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -346,12 +346,12 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">References</span></p>
 <ul class="current nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="requirements.html">System Requirements</a></li>
-<li class="toctree-l1 current active"><a class="current reference internal" href="#">Build System</a></li>
+<li class="toctree-l1"><a class="reference internal" href="build.html">Build System</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../device/index.html">Device Interface</a></li>
 <li class="toctree-l1"><a class="reference internal" href="retargeting/index.html">Retargeting Interface</a></li>
 <li class="toctree-l1"><a class="reference internal" href="mcap_record_replay.html">MCAP Recording &amp; Replay</a></li>
 <li class="toctree-l1"><a class="reference internal" href="oob_teleop_control.html">Out-of-Band Teleop Control</a></li>
-<li class="toctree-l1"><a class="reference internal" href="egocentric_hand_reconstruction.html">Egocentric Hand Reconstruction</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Egocentric Hand Reconstruction</a></li>
 <li class="toctree-l1"><a class="reference internal" href="license.html">License</a></li>
 </ul>
 </div>
@@ -387,7 +387,7 @@
         <i class="fa-solid fa-home"></i>
       </a>
     </li>
-    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Build System</span></li>
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Egocentric Hand Reconstruction</span></li>
   </ul>
 </nav>
 </div>
@@ -404,124 +404,161 @@
 <div id="searchbox"></div>
                 <article class="bd-article">
                   
-  <section id="build-system">
-<h1>Build System<a class="headerlink" href="#build-system" title="Link to this heading">#</a></h1>
-<section id="project-structure">
-<h2>Project structure<a class="headerlink" href="#project-structure" title="Link to this heading">#</a></h2>
-<p>The layout below reflects the actual <code class="docutils literal notranslate"><span class="pre">CMakeLists.txt</span></code> hierarchy (root <code class="docutils literal notranslate"><span class="pre">CMakeLists.txt</span></code> and <code class="docutils literal notranslate"><span class="pre">src/core/CMakeLists.txt</span></code>):</p>
-<div class="code-100col highlight-text notranslate"><div class="highlight"><pre><span></span>IsaacTeleop/
-├── CMakeLists.txt              # Top-level: deps, core, examples, plugins, etc.
-├── cmake/
-│   ├── SetupHunter.cmake       # BUILD_PLUGINS, Hunter for OAK/DepthAI
-│   ├── SetupPython.cmake       # BUILD_PYTHON_BINDINGS, uv-managed Python
-│   ├── ClangFormat.cmake       # clang_format_check / clang_format_fix
-│   └── ...
-├── deps/
-│   ├── CMakeLists.txt          # Adds third_party
-│   ├── third_party/CMakeLists.txt  # FetchContent: OpenXR, yaml-cpp, pybind11, etc.
-│   └── cloudxr/                # CloudXR (CI / optional)
-├── src/core/
-│   ├── CMakeLists.txt          # Core options, subdirs in dependency order
-│   ├── schema/                 # FlatBuffer schemas and generated code
-│   ├── oxr_utils/              # Header-only OpenXR utilities
-│   ├── plugin_manager/         # Plugin manager (C++ and Python)
-│   ├── oxr/                    # OpenXR session management (C++ and Python)
-│   ├── pusherio/               # PusherIO (depends on oxr)
-│   ├── deviceio/               # Device I/O library (C++ and Python)
-│   ├── mcap/                   # MCAP recording (depends on deviceio)
-│   ├── retargeting_engine/     # Retargeting (Python)
-│   ├── retargeting_engine_ui/  # Retargeting UI (Python)
-│   ├── teleop_session_manager/ # Teleop session manager (Python)
-│   ├── cloudxr/                # CloudXR runtime helper (Python)
-│   └── python/                 # Python wheel packaging (when BUILD_PYTHON_BINDINGS=ON)
-├── src/plugins/                # Built when BUILD_PLUGINS=ON
-│   ├── plugin_utils/
-│   ├── controller_synthetic_hands/
-│   ├── generic_3axis_pedal/
-│   ├── manus/
-│   └── oak/                    # When BUILD_PLUGIN_OAK_CAMERA=ON
-└── examples/
-    ├── oxr/                    # OpenXR examples (C++ and Python)
-    ├── retargeting/
-    ├── teleop_session_manager/
-    ├── teleop_ros2/
-    ├── schemaio/
-    └── native_openxr/
+  <section id="egocentric-hand-reconstruction">
+<h1>Egocentric Hand Reconstruction<a class="headerlink" href="#egocentric-hand-reconstruction" title="Link to this heading">#</a></h1>
+<p>Automated pipeline for 4D hand and camera pose reconstruction from egocentric
+videos. Integrates ViPE and Dyn-HaMR in containerized environments.</p>
+<section id="video-capture">
+<h2>Video Capture<a class="headerlink" href="#video-capture" title="Link to this heading">#</a></h2>
+<p>To capture egocentric video with an OAK camera, see the
+<a class="reference external" href="https://nvidia.github.io/IsaacTeleop/main/device/oak.html" rel="noopener noreferrer" target="_blank">OAK camera plugin</a> documentation.</p>
+</section>
+<section id="setup">
+<h2>Setup<a class="headerlink" href="#setup" title="Link to this heading">#</a></h2>
+<section id="system-requirement">
+<h3>System Requirement<a class="headerlink" href="#system-requirement" title="Link to this heading">#</a></h3>
+<ul class="simple">
+<li><p>OS: Ubuntu 24.04</p></li>
+<li><p>GPU: NVIDIA RTX 6000 Ada or L40</p></li>
+<li><p>Memory: 100GB (for a reference 30s video, more for longer)</p></li>
+<li><p>Storage: 100GB</p></li>
+</ul>
+</section>
+<section id="prepare-data-files">
+<h3>Prepare data files<a class="headerlink" href="#prepare-data-files" title="Link to this heading">#</a></h3>
+<p>Place required files in the <code class="docutils literal notranslate"><span class="pre">outputs/</span></code> directory.</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>...
+├── doc/
+├── docker/
+├── scripts/
+├── ...
+└── outputs/
+    ├── MANO_RIGHT.pkl
+    └── BMC/
+        └── *.npy
 </pre></div>
 </div>
-</section>
-<section id="cmake-integration">
-<h2>CMake integration<a class="headerlink" href="#cmake-integration" title="Link to this heading">#</a></h2>
-<p>The project uses a modern CMake target-based approach. Libraries export targets (e.g. OXR, DEVICEIO, schema); include directories are propagated. Package config files are generated for use after install. See the respective <code class="docutils literal notranslate"><span class="pre">CMakeLists.txt</span></code> in <code class="docutils literal notranslate"><span class="pre">src/core</span></code> and under <code class="docutils literal notranslate"><span class="pre">examples/</span></code> for target names and usage.</p>
-</section>
-<section id="using-the-python-wheel">
-<h2>Using the Python wheel<a class="headerlink" href="#using-the-python-wheel" title="Link to this heading">#</a></h2>
-<p>After building, install the wheel with <code class="docutils literal notranslate"><span class="pre">uv</span></code> or <code class="docutils literal notranslate"><span class="pre">pip</span></code>:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>isaacteleop<span class="w"> </span>--find-links<span class="o">=</span>./install/wheels/<span class="w"> </span>--reinstall
+<p><strong>MANO model</strong> (required):</p>
+<ul class="simple">
+<li><p>Download from: <a class="reference external" href="https://mano.is.tue.mpg.de/" rel="noopener noreferrer" target="_blank">https://mano.is.tue.mpg.de/</a></p></li>
+<li><p>Place: <code class="docutils literal notranslate"><span class="pre">outputs/MANO_RIGHT.pkl</span></code></p></li>
+</ul>
+<p><strong>BMC data</strong> (required):</p>
+<ul class="simple">
+<li><p>Follow the README in <a class="github reference external" href="https://github.com/MengHao666/Hand-BMC-pytorch" rel="noopener noreferrer" target="_blank">MengHao666/Hand-BMC-pytorch</a> to
+generate (until the step <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">calculate_bmc.py</span></code>)</p></li>
+<li><p>Place all <code class="docutils literal notranslate"><span class="pre">.npy</span></code> files in: <code class="docutils literal notranslate"><span class="pre">outputs/BMC/</span></code></p></li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The Hand-BMC-pytorch repository is no longer actively maintained, so parts
+of its setup may not work out-of-the-box on newer systems. At the time of
+writing, the <code class="docutils literal notranslate"><span class="pre">environment.yml</span></code> pins PyTorch to a specific build
+(<code class="docutils literal notranslate"><span class="pre">py3.7_cuda10.0.130_cudnn7.6.2_0</span></code>) that may no longer be available on
+Conda channels or compatible with current hardware. If Conda fails to
+resolve the environment, one workaround is to relax the pins in
+<code class="docutils literal notranslate"><span class="pre">environment.yml</span></code>:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="c1"># Before</span>
+<span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">pytorch==1.2.0=py3.7_cuda10.0.130_cudnn7.6.2_0</span>
+<span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">torchvision==0.4.0=py37_cu100</span>
 
-<span class="c1"># or</span>
-pip<span class="w"> </span>install<span class="w"> </span>install/wheels/isaacteleop-*.whl
+<span class="c1"># After</span>
+<span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">pytorch=1.2.0</span>
+<span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">torchvision=0.4.0</span>
+</pre></div>
+</div>
+<p>This fix reflects the state of the upstream repo at the time of writing and
+may need to be adjusted as the ecosystem evolves.</p>
+</div>
+</section>
+<section id="build-docker-images">
+<h3>Build Docker images<a class="headerlink" href="#build-docker-images" title="Link to this heading">#</a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>./docker/vipe.sh<span class="w"> </span>build
+./docker/dynhamr.sh<span class="w"> </span>build
+</pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Building these Docker images pulls third-party source code, libraries, and
+pre-trained model weights from external repositories. These components are
+subject to their own respective licenses, which may include restrictions on
+use, modification, or redistribution. It is the user’s responsibility to
+review and comply with all applicable third-party licenses before building,
+using, or distributing these images. Refer to each Dockerfile for the
+specific sources pulled during the build.</p>
+</div>
+</section>
+</section>
+<section id="hand-reconstruction">
+<h2>Hand Reconstruction<a class="headerlink" href="#hand-reconstruction" title="Link to this heading">#</a></h2>
+<p>Run complete reconstruction (ViPE + Dyn-HaMR) with a single command:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Using a local video file</span>
+./scripts/run_reconstruction.sh<span class="w"> </span>path/to/your_video.mp4
+
+<span class="c1"># Using a remote video file</span>
+./scripts/run_reconstruction.sh<span class="w"> </span>s3://path/to/your_video.mp4
+</pre></div>
+</div>
+<p>The script accepts either a <strong>local file path</strong> or a <code class="docutils literal notranslate"><span class="pre">s3://</span></code> <strong>URL</strong>
+pointing to a video on a S3-compatible cloud storage. When a URL is provided,
+the video is automatically downloaded to the <code class="docutils literal notranslate"><span class="pre">outputs/</span></code> directory before
+processing begins.</p>
+<p>To use a remote video, set the following environment variables for
+credentials:</p>
+<div class="pst-scrollable-table-container"><table class="table">
+<colgroup>
+<col style="width: 28.0%" />
+<col style="width: 12.0%" />
+<col style="width: 60.0%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Required</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">ACCESS_KEY_ID</span></code></p></td>
+<td><p>Yes</p></td>
+<td><p>Your S3 access key ID</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">SECRET_ACCESS_KEY</span></code></p></td>
+<td><p>Yes</p></td>
+<td><p>Your S3 access key</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">BUCKET_REGION</span></code></p></td>
+<td><p>No</p></td>
+<td><p>Region (default: <code class="docutils literal notranslate"><span class="pre">us-east-1</span></code>)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">BUCKET_ENDPOINT_URL</span></code></p></td>
+<td><p>No</p></td>
+<td><p>Custom endpoint for S3-compatible storage</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>By default, the pipeline reads data files from and writes results to the
+<code class="docutils literal notranslate"><span class="pre">outputs/</span></code> directory. Set <code class="docutils literal notranslate"><span class="pre">OUTPUTS_DIR</span></code> to use a different location:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">OUTPUTS_DIR</span><span class="o">=</span>/path/to/outputs<span class="w"> </span>./scripts/run_reconstruction.sh<span class="w"> </span>path/to/your_video.mp4
+</pre></div>
+</div>
+<p>The pipeline will:</p>
+<ol class="arabic simple">
+<li><p>Copy or download the video to <code class="docutils literal notranslate"><span class="pre">outputs/</span></code>.</p></li>
+<li><p>Run ViPE to estimate camera poses.</p></li>
+<li><p>Run Dyn-HaMR for hand reconstruction.</p></li>
+<li><p>Save all results to <code class="docutils literal notranslate"><span class="pre">outputs/logs/</span></code>.</p></li>
+</ol>
+<section id="view-results">
+<h3>View results<a class="headerlink" href="#view-results" title="Link to this heading">#</a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># List results</span>
+ls<span class="w"> </span>outputs/logs/video-custom/&lt;DATE&gt;/&lt;VIDEO_NAME&gt;*/
+
+<span class="c1"># View visualization</span>
+vlc<span class="w"> </span>outputs/logs/video-custom/&lt;DATE&gt;/&lt;VIDEO_NAME&gt;*/*_grid.mp4
 </pre></div>
 </div>
 </section>
-<section id="output-locations">
-<h2>Output locations<a class="headerlink" href="#output-locations" title="Link to this heading">#</a></h2>
-<p>After a successful build and install:</p>
-<ul class="simple">
-<li><p><strong>C++ libraries:</strong> <code class="docutils literal notranslate"><span class="pre">build/src/core/</span></code> (and under each module)</p></li>
-<li><p><strong>Python wheel:</strong> <code class="docutils literal notranslate"><span class="pre">build/wheels/isaacteleop-*.whl</span></code></p></li>
-<li><p><strong>Examples (binaries):</strong> under <code class="docutils literal notranslate"><span class="pre">build/examples/</span></code> (e.g. <code class="docutils literal notranslate"><span class="pre">build/examples/oxr/cpp/</span></code>)</p></li>
-<li><p><strong>Installed files:</strong> <code class="docutils literal notranslate"><span class="pre">install/</span></code> (or your <code class="docutils literal notranslate"><span class="pre">CMAKE_INSTALL_PREFIX</span></code>)
-- Libraries: <code class="docutils literal notranslate"><span class="pre">install/lib/</span></code>
-- Headers: <code class="docutils literal notranslate"><span class="pre">install/include/</span></code>
-- Wheels: <code class="docutils literal notranslate"><span class="pre">install/wheels/</span></code>
-- Examples: <code class="docutils literal notranslate"><span class="pre">install/examples/</span></code></p></li>
-</ul>
-</section>
-<section id="troubleshooting">
-<h2>Troubleshooting<a class="headerlink" href="#troubleshooting" title="Link to this heading">#</a></h2>
-<section id="dependencies-fail-to-download">
-<h3>Dependencies fail to download<a class="headerlink" href="#dependencies-fail-to-download" title="Link to this heading">#</a></h3>
-<p>FetchContent in <code class="docutils literal notranslate"><span class="pre">deps/third_party/CMakeLists.txt</span></code> requires network access. If downloads fail, check connectivity. Key repositories:</p>
-<ul class="simple">
-<li><p>OpenXR SDK: <a class="github reference external" href="https://github.com/KhronosGroup/OpenXR-SDK.git" rel="noopener noreferrer" target="_blank">KhronosGroup/OpenXR-SDK.git</a></p></li>
-<li><p>pybind11: <a class="github reference external" href="https://github.com/pybind/pybind11.git" rel="noopener noreferrer" target="_blank">pybind/pybind11.git</a></p></li>
-<li><p>yaml-cpp: <a class="github reference external" href="https://github.com/jbeder/yaml-cpp.git" rel="noopener noreferrer" target="_blank">jbeder/yaml-cpp.git</a></p></li>
-<li><p>FlatBuffers, Catch2, MCAP: see <code class="docutils literal notranslate"><span class="pre">deps/third_party/CMakeLists.txt</span></code> for URLs and tags.</p></li>
-</ul>
-<p>You can inspect the <code class="docutils literal notranslate"><span class="pre">_deps</span></code> directory in your build tree for fetch logs.</p>
-</section>
-<section id="cmake-can-t-find-openxr">
-<h3>CMake can’t find OpenXR<a class="headerlink" href="#cmake-can-t-find-openxr" title="Link to this heading">#</a></h3>
-<p>OpenXR is fetched automatically; it is not a system package. If configuration fails, try a clean configure:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>rm<span class="w"> </span>-rf<span class="w"> </span>build
-cmake<span class="w"> </span>-B<span class="w"> </span>build
-</pre></div>
-</div>
-</section>
-<section id="examples-or-tests-can-t-find-the-library">
-<h3>Examples or tests can’t find the library<a class="headerlink" href="#examples-or-tests-can-t-find-the-library" title="Link to this heading">#</a></h3>
-<p>When building from the top-level, examples and tests use the build tree. Ensure you run
-<code class="docutils literal notranslate"><span class="pre">cmake</span> <span class="pre">--build</span> <span class="pre">build</span></code> from the project root and run executables from the build directory (or use
-<code class="docutils literal notranslate"><span class="pre">cmake</span> <span class="pre">--install</span> <span class="pre">build</span></code> and run from <code class="docutils literal notranslate"><span class="pre">install/</span></code>).</p>
-</section>
-<section id="uv-or-python-version">
-<h3>uv or Python version<a class="headerlink" href="#uv-or-python-version" title="Link to this heading">#</a></h3>
-<p><code class="docutils literal notranslate"><span class="pre">cmake/SetupPython.cmake</span></code> requires <strong>uv</strong> and uses <code class="docutils literal notranslate"><span class="pre">ISAAC_TELEOP_PYTHON_VERSION</span></code>. Install uv as
-in <a class="reference internal" href="../getting_started/build_from_source/index.html#one-time-setup"><span class="std std-ref">One time setup</span></a> and pass <code class="docutils literal notranslate"><span class="pre">-DISAAC_TELEOP_PYTHON_VERSION=3.10</span></code> (or 3.11,
-3.12, 3.13) if you need a specific version.</p>
-</section>
-</section>
-<section id="reference">
-<h2>Reference<a class="headerlink" href="#reference" title="Link to this heading">#</a></h2>
-<ul class="simple">
-<li><p>Root build and options: <code class="docutils literal notranslate"><span class="pre">CMakeLists.txt</span></code></p></li>
-<li><p>Core modules and options: <code class="docutils literal notranslate"><span class="pre">src/core/CMakeLists.txt</span></code></p></li>
-<li><p>Dependencies: <code class="docutils literal notranslate"><span class="pre">deps/third_party/CMakeLists.txt</span></code></p></li>
-<li><p>Python and uv: <code class="docutils literal notranslate"><span class="pre">cmake/SetupPython.cmake</span></code></p></li>
-<li><p>Plugins and Hunter: <code class="docutils literal notranslate"><span class="pre">cmake/SetupHunter.cmake</span></code></p></li>
-<li><p>CI (Ubuntu, matrix build_type/python_version/arch): <code class="docutils literal notranslate"><span class="pre">.github/workflows/build-ubuntu.yml</span></code></p></li>
-</ul>
 </section>
 </section>
 
@@ -536,20 +573,20 @@ in <a class="reference internal" href="../getting_started/build_from_source/inde
                   
 <div class="prev-next-area">
     <a class="left-prev"
-       href="requirements.html"
+       href="oob_teleop_control.html"
        title="previous page">
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">previous</p>
-        <p class="prev-next-title">System Requirements</p>
+        <p class="prev-next-title">Out-of-Band Teleop Control</p>
       </div>
     </a>
     <a class="right-next"
-       href="../device/index.html"
+       href="license.html"
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">next</p>
-        <p class="prev-next-title">Device Interface</p>
+        <p class="prev-next-title">License</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -574,18 +611,17 @@ in <a class="reference internal" href="../getting_started/build_from_source/inde
   </div>
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#project-structure">Project structure</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#cmake-integration">CMake integration</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#using-the-python-wheel">Using the Python wheel</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#output-locations">Output locations</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#troubleshooting">Troubleshooting</a><ul class="nav section-nav flex-column">
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#dependencies-fail-to-download">Dependencies fail to download</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#cmake-can-t-find-openxr">CMake can’t find OpenXR</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#examples-or-tests-can-t-find-the-library">Examples or tests can’t find the library</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#uv-or-python-version">uv or Python version</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#video-capture">Video Capture</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#setup">Setup</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#system-requirement">System Requirement</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#prepare-data-files">Prepare data files</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#build-docker-images">Build Docker images</a></li>
 </ul>
 </li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#reference">Reference</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#hand-reconstruction">Hand Reconstruction</a><ul class="nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#view-results">View results</a></li>
+</ul>
+</li>
 </ul>
   </nav></div>
 
