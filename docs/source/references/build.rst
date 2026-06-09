@@ -12,7 +12,6 @@ The layout below reflects the actual ``CMakeLists.txt`` hierarchy (root ``CMakeL
    IsaacTeleop/
    ├── CMakeLists.txt              # Top-level: deps, core, examples, plugins, etc.
    ├── cmake/
-   │   ├── SetupHunter.cmake       # BUILD_PLUGINS, Hunter for OAK/DepthAI
    │   ├── SetupPython.cmake       # BUILD_PYTHON_BINDINGS, uv-managed Python
    │   ├── ClangFormat.cmake       # clang_format_check / clang_format_fix
    │   └── ...
@@ -125,5 +124,4 @@ Reference
 - Core modules and options: ``src/core/CMakeLists.txt``
 - Dependencies: ``deps/third_party/CMakeLists.txt``
 - Python and uv: ``cmake/SetupPython.cmake``
-- Plugins and Hunter: ``cmake/SetupHunter.cmake``
 - CI (Ubuntu, matrix build_type/python_version/arch): ``.github/workflows/build-ubuntu.yml``

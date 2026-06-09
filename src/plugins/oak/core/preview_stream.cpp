@@ -20,7 +20,7 @@ struct PreviewStream::Impl
     int tex_width = 0;
     int tex_height = 0;
 
-    std::shared_ptr<dai::DataOutputQueue> queue;
+    std::shared_ptr<dai::MessageQueue> queue;
 
     ~Impl()
     {
@@ -67,14 +67,11 @@ std::unique_ptr<PreviewStream> PreviewStream::create(const std::string& name,
     camRgb->setPreviewSize(preview_w, preview_h);
     camRgb->setInterleaved(true);
 
-    auto xout = pipeline.create<dai::node::XLinkOut>();
-    xout->setStreamName(name);
-    camRgb->preview.link(xout->input);
-
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
         throw std::runtime_error(std::string("Preview: SDL_Init failed: ") + SDL_GetError());
 
     auto impl = std::make_unique<Impl>();
+    impl->queue = camRgb->preview.createOutputQueue(4, false);
 
     impl->window = SDL_CreateWindow(
         name.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, preview_w, preview_h, SDL_WINDOW_SHOWN);
@@ -94,11 +91,6 @@ std::unique_ptr<PreviewStream> PreviewStream::create(const std::string& name,
 
     std::cout << "Color preview enabled (" << preview_w << "x" << preview_h << ")" << std::endl;
     return stream;
-}
-
-void PreviewStream::setOutputQueue(std::shared_ptr<dai::DataOutputQueue> queue)
-{
-    m_impl->queue = std::move(queue);
 }
 
 void PreviewStream::update()

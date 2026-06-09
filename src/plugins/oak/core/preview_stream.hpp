@@ -39,9 +39,6 @@ public:
                                                  dai::Pipeline& pipeline,
                                                  dai::ColorCameraProperties::SensorResolution resolution);
 
-    /** @brief Set the output queue to poll frames from. Call after Device::startPipeline. */
-    void setOutputQueue(std::shared_ptr<dai::DataOutputQueue> queue);
-
     /** @brief Poll the queue and display a frame if available. */
     void update();
 

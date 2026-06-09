@@ -58,12 +58,6 @@ OakCamera::OakCamera(const OakConfig& config, const std::vector<StreamConfig>& s
 
     m_device->startPipeline(pipeline);
 
-    for (const auto& s : streams)
-        m_queues[s.camera] = m_device->getOutputQueue(core::EnumNameStreamType(s.camera), 8, false);
-
-    if (m_preview)
-        m_preview->setOutputQueue(m_device->getOutputQueue(kPreviewStreamName, 4, false));
-
     std::cout << "OAK camera pipeline started" << std::endl;
 }
 
@@ -103,12 +97,13 @@ dai::Pipeline OakCamera::create_pipeline(const OakConfig& config,
                                          dai::ColorCameraProperties::SensorResolution color_resolution)
 {
     dai::Pipeline pipeline;
+    m_queues.clear();
 
     bool need_color = has_stream(streams, core::StreamType_Color);
     bool need_mono_left = has_stream(streams, core::StreamType_MonoLeft);
     bool need_mono_right = has_stream(streams, core::StreamType_MonoRight);
 
-    auto create_h264_output = [&](dai::Node::Output& source, const char* stream_name)
+    auto create_h264_output = [&](dai::Node::Output& source, core::StreamType stream)
     {
         auto enc = pipeline.create<dai::node::VideoEncoder>();
         enc->setDefaultProfilePreset(config.fps, dai::VideoEncoderProperties::Profile::H264_BASELINE);
@@ -118,11 +113,8 @@ dai::Pipeline OakCamera::create_pipeline(const OakConfig& config,
         enc->setNumBFrames(0);
         enc->setRateControlMode(dai::VideoEncoderProperties::RateControlMode::CBR);
 
-        auto xout = pipeline.create<dai::node::XLinkOut>();
-        xout->setStreamName(stream_name);
-
         source.link(enc->input);
-        enc->bitstream.link(xout->input);
+        m_queues[stream] = enc->bitstream.createOutputQueue(8, false);
     };
 
     // ---- Color camera ----
@@ -134,7 +126,7 @@ dai::Pipeline OakCamera::create_pipeline(const OakConfig& config,
         camRgb->setFps(config.fps);
         camRgb->setColorOrder(dai::ColorCameraProperties::ColorOrder::BGR);
 
-        create_h264_output(camRgb->video, core::EnumNameStreamType(core::StreamType_Color));
+        create_h264_output(camRgb->video, core::StreamType_Color);
     }
 
     // ---- Mono cameras ----
@@ -145,7 +137,7 @@ dai::Pipeline OakCamera::create_pipeline(const OakConfig& config,
         monoLeft->setResolution(dai::MonoCameraProperties::SensorResolution::THE_400_P);
         monoLeft->setFps(config.fps);
 
-        create_h264_output(monoLeft->out, core::EnumNameStreamType(core::StreamType_MonoLeft));
+        create_h264_output(monoLeft->out, core::StreamType_MonoLeft);
     }
 
     if (need_mono_right)
@@ -155,7 +147,7 @@ dai::Pipeline OakCamera::create_pipeline(const OakConfig& config,
         monoRight->setResolution(dai::MonoCameraProperties::SensorResolution::THE_400_P);
         monoRight->setFps(config.fps);
 
-        create_h264_output(monoRight->out, core::EnumNameStreamType(core::StreamType_MonoRight));
+        create_h264_output(monoRight->out, core::StreamType_MonoRight);
     }
 
     return pipeline;

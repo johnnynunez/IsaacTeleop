@@ -16,7 +16,7 @@ C++ plugin that captures H.264 video from OAK cameras and saves to raw H.264 fil
 
 ## Build
 
-DepthAI is fetched and built automatically via FetchContent. The first build takes ~10-15 minutes (mostly DepthAI and its Hunter dependencies), subsequent builds are fast.
+DepthAI is fetched and built automatically via FetchContent. The first build takes ~10-15 minutes; subsequent builds are fast.
 
 ```bash
 cd IsaacTeleop

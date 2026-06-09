@@ -25,8 +25,7 @@ Build
 -----
 
 DepthAI is fetched and built automatically via FetchContent. The first build
-takes ~10–15 minutes (mostly DepthAI and its Hunter dependencies); subsequent
-builds are fast.
+takes ~10–15 minutes; subsequent builds are fast.
 
 .. code-block:: bash
 

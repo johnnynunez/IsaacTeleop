@@ -142,7 +142,7 @@ Useful targets:
 Other Build options
 ~~~~~~~~~~~~~~~~~~~
 
-The CMake options (defined in root :code-file:`CMakeLists.txt`, :code-file:`cmake/SetupPython.cmake`, and :code-file:`cmake/SetupHunter.cmake`):
+The CMake options (defined in root :code-file:`CMakeLists.txt` and :code-file:`cmake/SetupPython.cmake`):
 
 .. list-table:: Common CMake Options
    :widths: 20 36 44
@@ -193,7 +193,7 @@ The CMake options (defined in root :code-file:`CMakeLists.txt`, :code-file:`cmak
      - ``ON``
    * - **OAK camera plugin**
      - ``BUILD_PLUGIN_OAK_CAMERA``
-     - ``OFF``; requires Hunter/DepthAI when ``ON``
+     - ``OFF``; requires DepthAI when ``ON``
    * - **Teleop ROS2 example only**
      - ``BUILD_EXAMPLE_TELEOP_ROS2``
      - ``OFF``; when ``ON``, only ``examples/teleop_ros2`` (e.g. Docker)
@@ -229,7 +229,7 @@ Build without Python bindings:
    cmake -B build -DBUILD_PYTHON_BINDINGS=OFF
    cmake --build build
 
-Build with OAK camera plugin (pulls Hunter/DepthAI):
+Build with OAK camera plugin (pulls DepthAI):
 
 .. code-block:: bash
 

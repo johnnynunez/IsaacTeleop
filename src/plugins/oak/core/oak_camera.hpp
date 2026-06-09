@@ -7,6 +7,7 @@
 #include <schema/oak_generated.h>
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -97,7 +98,7 @@ private:
                                   dai::ColorCameraProperties::SensorResolution color_resolution);
 
     std::shared_ptr<dai::Device> m_device;
-    std::map<core::StreamType, std::shared_ptr<dai::DataOutputQueue>> m_queues;
+    std::map<core::StreamType, std::shared_ptr<dai::MessageQueue>> m_queues;
 
     std::unique_ptr<FrameSink> m_sink;
     std::map<core::StreamType, uint64_t> m_frame_counts;

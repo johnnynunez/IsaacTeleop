@@ -42,16 +42,6 @@ jobs:
     - name: Setup sccache
       uses: Mozilla-Actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696  # v0.0.10
 
-    # Hunter cache - caches depthai dependencies
-    # Note: Hunter uses C:/.hunter on Windows (at drive root)
-    - name: Cache Hunter packages
-      uses: actions/cache@v5
-      with:
-        path: C:/.hunter
-        key: hunter-${{ runner.os }}-${{ hashFiles('cmake/SetupHunter.cmake') }}
-        restore-keys: |
-          hunter-${{ runner.os }}-
-
     - name: Verify sccache
       run: |
         sccache --version
@@ -96,6 +86,7 @@ jobs:
         -DCMAKE_C_COMPILER="cl.exe"
         -DCMAKE_CXX_COMPILER="cl.exe"
         -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
+        -DBUILD_PLUGIN_OAK_CAMERA=ON
         -DBUILD_VIZ=ON
 
     - name: Build
