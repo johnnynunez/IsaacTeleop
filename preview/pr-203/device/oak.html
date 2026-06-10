@@ -459,9 +459,12 @@ container overhead)</p></li>
 </section>
 <section id="build">
 <h2><a class="toc-backref" href="#id2" role="doc-backlink">Build</a><a class="headerlink" href="#build" title="Link to this heading">#</a></h2>
-<p>DepthAI v3.x is fetched and built automatically via FetchContent. Dependencies
-are managed by <strong>vcpkg</strong>. The first build takes ~10–15 minutes (mostly vcpkg
-deps + DepthAI); subsequent builds are fast.</p>
+<p>DepthAI v3.x is fetched and built automatically via FetchContent. Its transitive
+dependencies are managed by <strong>vcpkg</strong>: rather than tracking our own <code class="docutils literal notranslate"><span class="pre">vcpkg.json</span></code>,
+the build downloads <strong>DepthAI’s own vcpkg manifest</strong> for the pinned tag at configure
+time (see <code class="docutils literal notranslate"><span class="pre">cmake/DepthAIVcpkgManifest.cmake</span></code>) and enables its <code class="docutils literal notranslate"><span class="pre">usb</span></code> feature for
+libusb. The first build takes ~10–15 minutes (mostly vcpkg deps + DepthAI);
+subsequent builds are fast.</p>
 <section id="prerequisites">
 <h3><a class="toc-backref" href="#id3" role="doc-backlink">Prerequisites</a><a class="headerlink" href="#prerequisites" title="Link to this heading">#</a></h3>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Install build tools for vcpkg to build libusb (Linux)</span>
@@ -655,7 +658,9 @@ the same SchemaPusher flow.</p>
 <ul class="simple">
 <li><p><strong>DepthAI v3.x</strong> — OAK camera interface (FetchContent)</p></li>
 <li><p><strong>SDL2</strong> — Live preview window (FetchContent, used by <code class="docutils literal notranslate"><span class="pre">--preview</span></code>)</p></li>
-<li><p><strong>vcpkg</strong> — nlohmann-json, spdlog, libusb, openssl, libarchive, etc.</p></li>
+<li><p><strong>vcpkg</strong> — DepthAI’s transitive deps (nlohmann-json, spdlog, libusb,
+libarchive, etc.), resolved from DepthAI’s own auto-downloaded manifest
+(<code class="docutils literal notranslate"><span class="pre">usb</span></code> feature enabled for libusb)</p></li>
 </ul>
 </section>
 <section id="output-format">
@@ -852,7 +857,7 @@ ffprobe<span class="w"> </span>-show_entries<span class="w"> </span><span class=
 
   <p class="copyright">
     
-      Copyright © 2025-2026, NVIDIA CORPORATION &amp; AFFILIATES, last updated on June 09, 2026.
+      Copyright © 2025-2026, NVIDIA CORPORATION &amp; AFFILIATES, last updated on June 10, 2026.
       <br/>
     
   </p>
