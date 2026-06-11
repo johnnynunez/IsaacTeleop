@@ -444,7 +444,8 @@ optional velocity/effort) and <code class="docutils literal notranslate"><span c
 </tr>
 <tr class="row-odd"><td><p>Plugin</p></td>
 <td><p><a class="reference external" href="https://github.com/NVIDIA/IsaacTeleop/tree/main/src/plugins/so101_leader" rel="noopener noreferrer" target="_blank">src/plugins/so101_leader</a> – pushes <code class="docutils literal notranslate"><span class="pre">JointStateOutput</span></code> via <code class="docutils literal notranslate"><span class="pre">SchemaPusher</span></code>.
-Ships a synthetic backend; the real Feetech/serial read is a marked seam.</p></td>
+Reads the FEETECH STS3215 servos over serial (<code class="docutils literal notranslate"><span class="pre">FeetechBus</span></code>); synthetic fallback when no
+device path is given.</p></td>
 </tr>
 <tr class="row-even"><td><p>Tracker</p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">JointStateTracker</span></code> (facade) with live (<code class="docutils literal notranslate"><span class="pre">LiveJointStateTrackerImpl</span></code>) and MCAP-replay
@@ -491,16 +492,21 @@ surface joint <strong>positions</strong> only.</p>
 <section id="the-so-101-leader-plugin">
 <h2>The SO-101 leader plugin<a class="headerlink" href="#the-so-101-leader-plugin" title="Link to this heading">#</a></h2>
 <p><code class="docutils literal notranslate"><span class="pre">so101_leader</span></code> reads the six SO-101 servos (<code class="docutils literal notranslate"><span class="pre">shoulder_pan,</span> <span class="pre">shoulder_lift,</span> <span class="pre">elbow_flex,</span>
-<span class="pre">wrist_flex,</span> <span class="pre">wrist_roll,</span> <span class="pre">gripper</span></code>) and pushes them to a tensor collection. To keep the example
-hardware-free and headless it ships a <strong>synthetic backend</strong>; the real Feetech read (via LeRobot’s
-<code class="docutils literal notranslate"><span class="pre">FeetechMotorsBus</span></code> + calibration) is the marked seam in <code class="docutils literal notranslate"><span class="pre">So101LeaderPlugin::read_hardware()</span></code>.</p>
+<span class="pre">wrist_flex,</span> <span class="pre">wrist_roll,</span> <span class="pre">gripper</span></code>) and pushes them to a tensor collection. With a serial device
+path it talks to the FEETECH STS3215 bus servos directly via <code class="docutils literal notranslate"><span class="pre">FeetechBus</span></code> – the same SMS/STS
+wire protocol the FEETECH SCServo SDK / LeRobot’s <code class="docutils literal notranslate"><span class="pre">FeetechMotorsBus</span></code> use, with no SDK dependency:
+it disables torque (so the leader can be back-driven) and reads <code class="docutils literal notranslate"><span class="pre">Present_Position</span></code> each frame,
+converting ticks to radians with per-joint calibration. With no device path it falls back to a
+<strong>synthetic</strong> trajectory so the pipeline runs hardware-free (CI and the headless example).</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Synthetic backend (no hardware), default collection id &quot;so101_leader&quot;:</span>
 ./install/plugins/so101_leader/so101_leader_plugin
 
-<span class="c1"># Reserved for the real serial backend + a custom collection id:</span>
-./install/plugins/so101_leader/so101_leader_plugin<span class="w"> </span>/dev/ttyACM0<span class="w"> </span>so101_leader
+<span class="c1"># Real SO-101 leader on a serial port (Linux), optional calibration file:</span>
+./install/plugins/so101_leader/so101_leader_plugin<span class="w"> </span>/dev/ttyACM0<span class="w"> </span>so101_leader<span class="w"> </span>so101_leader.calib
 </pre></div>
 </div>
+<p>See the <a class="reference external" href="https://github.com/NVIDIA/IsaacTeleop/blob/main/src/plugins/so101_leader/README.md" rel="noopener noreferrer" target="_blank">plugin README</a> for hardware setup
+(unique servo ids, gear removal, back-driving) and the calibration file format.</p>
 <p>The consumer side creates a <code class="docutils literal notranslate"><span class="pre">JointStateSource(name=...,</span> <span class="pre">collection_id=&quot;so101_leader&quot;,</span>
 <span class="pre">joint_names=[...])</span></code> on the same <code class="docutils literal notranslate"><span class="pre">collection_id</span></code>; <code class="docutils literal notranslate"><span class="pre">TeleopSession</span></code> discovers and polls the
 <code class="docutils literal notranslate"><span class="pre">JointStateTracker</span></code> each frame.</p>
@@ -673,7 +679,7 @@ the end-to-end example, and validation.</p>
 
   <p class="copyright">
     
-      Copyright © 2025-2026, NVIDIA CORPORATION &amp; AFFILIATES, last updated on June 10, 2026.
+      Copyright © 2025-2026, NVIDIA CORPORATION &amp; AFFILIATES, last updated on June 11, 2026.
       <br/>
     
   </p>
