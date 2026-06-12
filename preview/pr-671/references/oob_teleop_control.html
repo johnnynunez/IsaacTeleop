@@ -430,6 +430,16 @@ Pages (useful in air-gapped environments):</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>-m<span class="w"> </span>isaacteleop.cloudxr<span class="w"> </span>--accept-eula<span class="w"> </span>--setup-oob<span class="w"> </span>--host-client
 </pre></div>
 </div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>On <strong>first run</strong>, the launcher fetches <code class="docutils literal notranslate"><span class="pre">index.html</span></code> and <code class="docutils literal notranslate"><span class="pre">bundle.js</span></code> from
+GitHub Pages and caches them in <code class="docutils literal notranslate"><span class="pre">~/.cloudxr/static-client/</span></code> (override with
+<code class="docutils literal notranslate"><span class="pre">TELEOP_WEB_CLIENT_STATIC_DIR</span></code>).  Subsequent runs are fully offline.</p>
+<p>For a <strong>true air-gapped machine</strong>, either run once on a networked host first
+to populate the cache, or pre-stage the two files by copying
+<code class="docutils literal notranslate"><span class="pre">~/.cloudxr/static-client/</span></code> (or a tarball of it) to the target machine
+before the first run.</p>
+</div>
 <p>This will:</p>
 <ol class="arabic simple">
 <li><p>Verify a USB-connected headset is available via <code class="docutils literal notranslate"><span class="pre">adb</span> <span class="pre">devices</span></code></p></li>
