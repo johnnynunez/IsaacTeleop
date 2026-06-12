@@ -257,7 +257,7 @@ def _json_response(status: int, phrase: str, body: dict) -> Response:
     )
 
 
-def _make_http_handler(backend_host, backend_port, hub=None):
+def _make_http_handler(backend_host, backend_port, hub=None, static_dir=None):
     async def handle_http_request(connection, request):
         if request.headers.get("Upgrade", "").lower() == "websocket":
             return None
@@ -317,6 +317,37 @@ def _make_http_handler(backend_host, backend_port, hub=None):
                 "Not Found",
                 Headers({"Content-Type": "text/plain", **CORS_HEADERS}),
                 b"Not found",
+            )
+
+        if static_dir is not None and (
+            path == "/client" or path.startswith("/client/")
+        ):
+            _MIME = {
+                "index.html": "text/html; charset=utf-8",
+                "bundle.js": "application/javascript; charset=utf-8",
+            }
+            tail = path[len("/client") :].lstrip("/") or "index.html"
+            if tail not in _MIME:
+                return Response(
+                    404,
+                    "Not Found",
+                    Headers({"Content-Type": "text/plain", **CORS_HEADERS}),
+                    b"Not found",
+                )
+            try:
+                body = (static_dir / tail).read_bytes()
+            except OSError:
+                return Response(
+                    503,
+                    "Service Unavailable",
+                    Headers({"Content-Type": "text/plain", **CORS_HEADERS}),
+                    b"Static file unavailable",
+                )
+            return Response(
+                200,
+                "OK",
+                Headers({"Content-Type": _MIME[tail], **CORS_HEADERS}),
+                body,
             )
 
         return Response(
@@ -465,6 +496,7 @@ async def run(
     proxy_port: int | None = None,
     setup_oob: bool = False,
     usb_local: bool = False,
+    host_client: bool = False,
 ) -> None:
     logger = log
     logger.setLevel(logging.INFO)
@@ -518,7 +550,15 @@ async def run(
                     return hub.handle_connection(ws)
             return proxy_handler(ws, backend_host, backend_port)
 
-        http_handler = _make_http_handler(backend_host, backend_port, hub=hub)
+        _host_client_static_dir = None
+        if host_client:
+            from .oob_teleop_env import require_web_client_static_dir  # noqa: PLC0415
+
+            _host_client_static_dir = require_web_client_static_dir()
+
+        http_handler = _make_http_handler(
+            backend_host, backend_port, hub=hub, static_dir=_host_client_static_dir
+        )
 
         async with ws_serve(
             handler,
@@ -536,10 +576,12 @@ async def run(
             log.info("WSS proxy listening on port %d", resolved_port)
 
             # ------------------------------------------------------------------
-            # USB-local: HTTPS static client (:func:`oob_teleop_env.usb_ui_port`,
-            # default 8080; override via ``USB_UI_PORT`` env) + adb reverse
-            # (WSS / backend / TURN) + coturn. Assets are ensured in
-            # require_usb_local_webxr_static_dir (also called from launcher).
+            # USB-local: separate HTTPS static client on 127.0.0.1:<usb_ui_port>
+            # (default 8080; override via ``USB_UI_PORT``) + adb reverse
+            # (WSS / backend / TURN) + coturn.
+            # --host-client: serves the web client at /client/ on the WSS proxy
+            # port; assets ensured by require_web_client_static_dir (called
+            # above and also from launcher).
             # ------------------------------------------------------------------
             # The coturn handle lives in a 1-element list so the watchdog
             # (H7) can replace it after a mid-session restart while keeping
@@ -563,14 +605,31 @@ async def run(
             try:
                 if usb_local:
                     from .oob_teleop_env import (  # noqa: PLC0415
-                        USB_TURN_USER,
-                        USB_TURN_CREDENTIAL,
-                        require_usb_local_webxr_static_dir,
+                        require_web_client_static_dir as _req_static,
                         start_usb_local_https_server,
                         stop_usb_local_https_server,
+                        usb_ui_port,
+                    )
+
+                    _ui_port = usb_ui_port()
+                    oob_progress(
+                        "usb-local",
+                        f"HTTPS client on 127.0.0.1:{_ui_port} ...",
+                    )
+                    _usb_https_thread, _usb_https_httpd = start_usb_local_https_server(
+                        _req_static(),
+                        cert_file=cert_paths.cert_file,
+                        key_file=cert_paths.key_file,
+                        port=_ui_port,
+                        host="127.0.0.1",
+                    )
+
+                if usb_local:
+                    from .oob_teleop_env import (  # noqa: PLC0415
+                        USB_TURN_USER,
+                        USB_TURN_CREDENTIAL,
                         usb_backend_port,
                         usb_turn_port,
-                        usb_ui_port,
                     )
 
                     # Resolve once so the coturn bind, adb reverse, and shutdown
@@ -598,18 +657,6 @@ async def run(
                     # the four ports we own.
                     teardown_adb_reverse_ports()
                     teardown_adb_reverse_turn(_usb_turn_port_resolved)
-
-                    oob_progress(
-                        "usb-local",
-                        f"HTTPS static UI on https://localhost:{usb_ui_port()} ...",
-                    )
-                    static_root = require_usb_local_webxr_static_dir()
-                    _usb_https_thread, _usb_https_httpd = start_usb_local_https_server(
-                        static_root,
-                        cert_file=cert_paths.cert_file,
-                        key_file=cert_paths.key_file,
-                        port=usb_ui_port(),
-                    )
 
                     # 2. adb reverse for TCP ports (WebXR UI, WSS proxy, backend)
                     _expected_tcp_ports = [
@@ -715,7 +762,9 @@ async def run(
                     )
                     try:
                         oob_monitor_task = await run_oob_connect(
-                            resolved_port=resolved_port, usb_local=usb_local
+                            resolved_port=resolved_port,
+                            usb_local=usb_local,
+                            host_client=host_client,
                         )
                         log.info("OOB automation completed — CONNECT clicked")
                         oob_progress("setup-oob", "CONNECT dispatched — session active")
@@ -744,7 +793,9 @@ async def run(
                         )
                         try:
                             fallback_url = build_teleop_url(
-                                resolved_port=resolved_port, usb_local=usb_local
+                                resolved_port=resolved_port,
+                                usb_local=usb_local,
+                                host_client=host_client,
                             )
                         except Exception:
                             fallback_url = ""
@@ -782,8 +833,9 @@ async def run(
                     if _usb_turn_port_resolved is not None:
                         teardown_adb_reverse_turn(_usb_turn_port_resolved)
                     teardown_adb_reverse_ports()
-                    stop_usb_local_https_server(_usb_https_thread, _usb_https_httpd)
                     log.info("USB-local: cleanup complete")
+                if usb_local:
+                    stop_usb_local_https_server(_usb_https_thread, _usb_https_httpd)
 
             log.info("Shutting down ...")
     except OSError as e:
