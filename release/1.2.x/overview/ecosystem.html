@@ -273,11 +273,11 @@
 <div class="version-switcher">
   <label for="version-select" class="version-switcher__label">Version</label>
   <select id="version-select" class="version-switcher__select" onchange="location = this.value;">
-    <option value="../../1.3.x/overview/ecosystem.html" >release/1.3.x</option>
     <option value="../../../main/overview/ecosystem.html" >main</option>
     <option value="../../1.0.x/overview/ecosystem.html" >release/1.0.x</option>
     <option value="../../1.1.x/overview/ecosystem.html" >release/1.1.x</option>
     <option value="ecosystem.html" selected>release/1.2.x</option>
+    <option value="../../1.3.x/overview/ecosystem.html" >release/1.3.x</option>
     <option value="../../../v1.1.8/overview/ecosystem.html" >v1.1.8</option>
     <option value="../../../v1.1.5/overview/ecosystem.html" >v1.1.5</option>
     <option value="../../../v1.0.193/overview/ecosystem.html" >v1.0.193</option>
@@ -425,8 +425,8 @@
 <h2>Unified Stack for Sim &amp; Real Teleoperation<a class="headerlink" href="#unified-stack-for-sim-real-teleoperation" title="Link to this heading">#</a></h2>
 <p>A single framework that works seamlessly across simulated and real-world robots, ensuring
 streamlined device workflow and consistent data schemas.</p>
-<div class="pst-scrollable-table-container"><table class="table" id="id8">
-<caption><span class="caption-text">Robotics Stacks</span><a class="headerlink" href="#id8" title="Link to this table">#</a></caption>
+<div class="pst-scrollable-table-container"><table class="table" id="id9">
+<caption><span class="caption-text">Robotics Stacks</span><a class="headerlink" href="#id9" title="Link to this table">#</a></caption>
 <colgroup>
 <col style="width: 17.6%" />
 <col style="width: 58.8%" />
@@ -470,8 +470,8 @@ custom device integrations and ongoing maintenance. It supports multiple XR head
 peripherals. Each device provides different input modes, which determine which retargeters and
 control schemes are available. Easily extend support for additional devices through a plugin system;
 see <a class="reference internal" href="../device/index.html#device-interface-device-plugin"><span class="std std-ref">Isaac Teleop device plugin (C++ level)</span></a> for details.</p>
-<div class="pst-scrollable-table-container"><table class="table" id="id9">
-<caption><span class="caption-text">XR Headsets and Tracking Peripherals</span><a class="headerlink" href="#id9" title="Link to this table">#</a></caption>
+<div class="pst-scrollable-table-container"><table class="table" id="id10">
+<caption><span class="caption-text">XR Headsets and Tracking Peripherals</span><a class="headerlink" href="#id10" title="Link to this table">#</a></caption>
 <colgroup>
 <col style="width: 20.0%" />
 <col style="width: 25.0%" />
@@ -493,17 +493,17 @@ see <a class="reference internal" href="../device/index.html#device-interface-de
 </tr>
 <tr class="row-odd"><td><p>Meta Quest 2/3/3S</p></td>
 <td><p>Motion controllers (triggers, thumbsticks, squeeze), hand tracking</p></td>
-<td><p><a class="reference external" href="https://nvidia.github.io/IsaacTeleop/client" rel="noopener noreferrer" target="_blank">Isaac Teleop Web Client</a> (browser)</p></td>
+<td><p><a href="#id13"><span class="problematic" id="id14">`Isaac Teleop Web Client`_</span></a> (browser)</p></td>
 <td><p>See <a class="reference internal" href="../getting_started/quick_start.html#connect-quest-pico"><span class="std std-ref">Connect Quest and Pico</span></a></p></td>
 </tr>
 <tr class="row-even"><td><p>Pico 4 Ultra</p></td>
 <td><p>Motion controllers, hand tracking</p></td>
-<td><p><a class="reference external" href="https://nvidia.github.io/IsaacTeleop/client" rel="noopener noreferrer" target="_blank">Isaac Teleop Web Client</a> (browser)</p></td>
+<td><p><a href="#id15"><span class="problematic" id="id16">`Isaac Teleop Web Client`_</span></a> (browser)</p></td>
 <td><p>Requires Pico OS 15.4.4U or newer</p></td>
 </tr>
 <tr class="row-odd"><td><p><a class="reference external" href="https://www.picoxr.com/global/products/pico-motion-tracker" rel="noopener noreferrer" target="_blank">Pico Motion Tracker</a></p></td>
 <td><p>Full body tracking</p></td>
-<td><p><a class="reference external" href="https://nvidia.github.io/IsaacTeleop/client" rel="noopener noreferrer" target="_blank">Isaac Teleop Web Client</a> (browser)</p></td>
+<td><p><a href="#id17"><span class="problematic" id="id18">`Isaac Teleop Web Client`_</span></a> (browser)</p></td>
 <td><div class="line-block">
 <div class="line">Requires Pico OS 15.4.4U or newer</div>
 <div class="line">Requires Pico Browser 4.0.40 or newer (Enterprise enabled)</div>
@@ -516,8 +516,8 @@ see <a class="reference internal" href="../device/index.html#device-interface-de
 <p>In addition to the fully integrated XR headsets, Isaac Teleop also supports standalone input
 devices. Those devices are typically directly connected to the workstation where the Isaac Teleop
 session is running via USB or Bluetooth. See <a class="reference internal" href="../device/index.html#device-interface-device-plugin"><span class="std std-ref">Isaac Teleop device plugin (C++ level)</span></a> for more details.</p>
-<div class="pst-scrollable-table-container"><table class="table" id="id10">
-<caption><span class="caption-text">Standalone Input Devices</span><a class="headerlink" href="#id10" title="Link to this table">#</a></caption>
+<div class="pst-scrollable-table-container"><table class="table" id="id11">
+<caption><span class="caption-text">Standalone Input Devices</span><a class="headerlink" href="#id11" title="Link to this table">#</a></caption>
 <colgroup>
 <col style="width: 28.6%" />
 <col style="width: 35.7%" />
@@ -549,8 +549,8 @@ session is running via USB or Bluetooth. See <a class="reference internal" href=
 <section id="planned-input-device-support">
 <h2>Planned Input Device Support<a class="headerlink" href="#planned-input-device-support" title="Link to this heading">#</a></h2>
 <p>The following input devices and device categories are planned for support in the future:</p>
-<div class="pst-scrollable-table-container"><table class="table" id="id11">
-<caption><span class="caption-text">Planned Input Devices</span><a class="headerlink" href="#id11" title="Link to this table">#</a></caption>
+<div class="pst-scrollable-table-container"><table class="table" id="id12">
+<caption><span class="caption-text">Planned Input Devices</span><a class="headerlink" href="#id12" title="Link to this table">#</a></caption>
 <colgroup>
 <col style="width: 21.1%" />
 <col style="width: 26.3%" />
@@ -751,7 +751,7 @@ live retargeter tuning.</p></li>
 
   <p class="copyright">
     
-      Copyright © 2025-2026, NVIDIA CORPORATION &amp; AFFILIATES, last updated on June 11, 2026.
+      Copyright © 2025-2026, NVIDIA CORPORATION &amp; AFFILIATES, last updated on June 12, 2026.
       <br/>
     
   </p>
