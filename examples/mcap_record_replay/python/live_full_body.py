@@ -18,8 +18,10 @@ See: https://nvidia.github.io/IsaacTeleop/main/references/mcap_record_replay.htm
 """
 
 import argparse
+import contextlib
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 import viser
@@ -49,6 +51,18 @@ def main(argv: list[str]) -> int:
         default="~/.cloudxr",
         help="CloudXR install directory (default: ~/.cloudxr)",
     )
+    parser.add_argument(
+        "--env-file",
+        default=str(Path(__file__).parent / "default.env"),
+        help="Path to a KEY=value env file for CloudXR overrides (default: default.env)",
+    )
+    parser.add_argument(
+        "--launch-cloudxr-runtime",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Launch the CloudXR runtime automatically (default: true; pass "
+        "--no-launch-cloudxr-runtime to connect to the system runtime instead)",
+    )
     args = parser.parse_args(argv[1:])
 
     server = viser.ViserServer(host=args.host, port=args.port)
@@ -60,11 +74,18 @@ def main(argv: list[str]) -> int:
         pipeline=build_full_body_pipeline(),
     )
 
-    with CloudXRLauncher(
-        install_dir=args.install_dir,
-        accept_eula=args.accept_eula,
-    ) as launcher:
-        print(f"[live] CloudXR runtime started (WSS log: {launcher.wss_log_path})")
+    launcher_ctx = (
+        contextlib.nullcontext()
+        if not args.launch_cloudxr_runtime
+        else CloudXRLauncher(
+            install_dir=args.install_dir,
+            env_config=args.env_file,
+            accept_eula=args.accept_eula,
+        )
+    )
+    with launcher_ctx as launcher:
+        if launcher is not None:
+            print(f"[live] CloudXR runtime started (WSS log: {launcher.wss_log_path})")
         print("[live] waiting for headset connection… (Ctrl+C to stop)")
 
         with TeleopSession(config) as session:
