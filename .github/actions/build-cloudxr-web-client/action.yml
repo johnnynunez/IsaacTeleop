@@ -63,3 +63,13 @@ runs:
       shell: bash
       working-directory: deps/cloudxr/webxr_client
       run: npm test
+
+    - name: Install Playwright browser
+      shell: bash
+      working-directory: deps/cloudxr/webxr_client
+      run: npx playwright install --with-deps chromium
+
+    - name: Test Quick Start web client path
+      shell: bash
+      working-directory: deps/cloudxr/webxr_client
+      run: npm run test:e2e
