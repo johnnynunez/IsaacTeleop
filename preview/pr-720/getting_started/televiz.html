@@ -452,7 +452,7 @@ directly.</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>pip<span class="w"> </span>install<span class="w"> </span>isaacteleop
 </pre></div>
 </div>
-<p>The published wheels (Linux x86_64 / aarch64, CPython 3.10–3.12) bundle the compiled
+<p>The published wheels (Linux x86_64 / aarch64, CPython 3.10–3.13) bundle the compiled
 <code class="docutils literal notranslate"><span class="pre">isaacteleop.viz</span></code> module, so <strong>no source build is required</strong>. Verify with:</p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">isaacteleop.viz</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">televiz</span>
 </pre></div>
@@ -517,12 +517,12 @@ running OpenXR runtime (e.g. CloudXR).</p></td>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">cupy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">cp</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">isaacteleop.viz</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">televiz</span>
 
-<span class="n">cfg</span> <span class="o">=</span> <span class="n">televiz</span><span class="o">.</span><span class="n">VizSessionConfig</span><span class="p">()</span>
-<span class="n">cfg</span><span class="o">.</span><span class="n">mode</span> <span class="o">=</span> <span class="n">televiz</span><span class="o">.</span><span class="n">DisplayMode</span><span class="o">.</span><span class="n">kOffscreen</span>
-<span class="n">cfg</span><span class="o">.</span><span class="n">window_width</span> <span class="o">=</span> <span class="mi">1024</span>
-<span class="n">cfg</span><span class="o">.</span><span class="n">window_height</span> <span class="o">=</span> <span class="mi">1024</span>
+<span class="n">viz_cfg</span> <span class="o">=</span> <span class="n">televiz</span><span class="o">.</span><span class="n">VizSessionConfig</span><span class="p">()</span>
+<span class="n">viz_cfg</span><span class="o">.</span><span class="n">mode</span> <span class="o">=</span> <span class="n">televiz</span><span class="o">.</span><span class="n">DisplayMode</span><span class="o">.</span><span class="n">kOffscreen</span>
+<span class="n">viz_cfg</span><span class="o">.</span><span class="n">window_width</span> <span class="o">=</span> <span class="mi">1024</span>
+<span class="n">viz_cfg</span><span class="o">.</span><span class="n">window_height</span> <span class="o">=</span> <span class="mi">1024</span>
 
-<span class="n">session</span> <span class="o">=</span> <span class="n">televiz</span><span class="o">.</span><span class="n">VizSession</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">cfg</span><span class="p">)</span>
+<span class="n">session</span> <span class="o">=</span> <span class="n">televiz</span><span class="o">.</span><span class="n">VizSession</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">viz_cfg</span><span class="p">)</span>
 
 <span class="n">layer_cfg</span> <span class="o">=</span> <span class="n">televiz</span><span class="o">.</span><span class="n">QuadLayerConfig</span><span class="p">()</span>
 <span class="n">layer_cfg</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="s2">&quot;cam&quot;</span>
@@ -747,19 +747,19 @@ extensions automatically), then pass the handles through:</p>
 <span class="kn">from</span><span class="w"> </span><span class="nn">isaacteleop.deviceio</span><span class="w"> </span><span class="kn">import</span> <span class="n">DeviceIOSession</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">teleopcore.oxr</span><span class="w"> </span><span class="kn">import</span> <span class="n">OpenXRSessionHandles</span>
 
-<span class="n">cfg</span> <span class="o">=</span> <span class="n">televiz</span><span class="o">.</span><span class="n">VizSessionConfig</span><span class="p">()</span>
-<span class="n">cfg</span><span class="o">.</span><span class="n">mode</span> <span class="o">=</span> <span class="n">televiz</span><span class="o">.</span><span class="n">DisplayMode</span><span class="o">.</span><span class="n">kXr</span>
+<span class="n">viz_cfg</span> <span class="o">=</span> <span class="n">televiz</span><span class="o">.</span><span class="n">VizSessionConfig</span><span class="p">()</span>
+<span class="n">viz_cfg</span><span class="o">.</span><span class="n">mode</span> <span class="o">=</span> <span class="n">televiz</span><span class="o">.</span><span class="n">DisplayMode</span><span class="o">.</span><span class="n">kXr</span>
 <span class="c1"># Aggregate the XR extensions downstream trackers need so they&#39;re present</span>
 <span class="c1"># on the XrInstance Televiz is about to create.</span>
-<span class="n">cfg</span><span class="o">.</span><span class="n">required_extensions</span> <span class="o">=</span> <span class="n">DeviceIOSession</span><span class="o">.</span><span class="n">get_required_extensions</span><span class="p">(</span><span class="n">trackers</span><span class="p">)</span>
-<span class="n">viz_session</span> <span class="o">=</span> <span class="n">televiz</span><span class="o">.</span><span class="n">VizSession</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">cfg</span><span class="p">)</span>
+<span class="n">viz_cfg</span><span class="o">.</span><span class="n">required_extensions</span> <span class="o">=</span> <span class="n">DeviceIOSession</span><span class="o">.</span><span class="n">get_required_extensions</span><span class="p">(</span><span class="n">trackers</span><span class="p">)</span>
+<span class="n">viz_session</span> <span class="o">=</span> <span class="n">televiz</span><span class="o">.</span><span class="n">VizSession</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">viz_cfg</span><span class="p">)</span>
 
-<span class="n">config</span> <span class="o">=</span> <span class="n">TeleopSessionConfig</span><span class="p">(</span>
+<span class="n">teleop_cfg</span> <span class="o">=</span> <span class="n">TeleopSessionConfig</span><span class="p">(</span>
     <span class="n">app_name</span><span class="o">=</span><span class="s2">&quot;MyApp&quot;</span><span class="p">,</span>
     <span class="n">pipeline</span><span class="o">=</span><span class="n">pipeline</span><span class="p">,</span>
     <span class="n">oxr_handles</span><span class="o">=</span><span class="n">OpenXRSessionHandles</span><span class="p">(</span><span class="o">*</span><span class="n">viz_session</span><span class="o">.</span><span class="n">get_oxr_handles</span><span class="p">()),</span>
 <span class="p">)</span>
-<span class="k">with</span> <span class="n">TeleopSession</span><span class="p">(</span><span class="n">config</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
+<span class="k">with</span> <span class="n">TeleopSession</span><span class="p">(</span><span class="n">teleop_cfg</span><span class="p">)</span> <span class="k">as</span> <span class="n">session</span><span class="p">:</span>
     <span class="k">while</span> <span class="n">running</span><span class="p">:</span>
         <span class="n">session</span><span class="o">.</span><span class="n">step</span><span class="p">()</span>
         <span class="n">cam_layer</span><span class="o">.</span><span class="n">submit</span><span class="p">(</span><span class="n">camera_frame</span><span class="p">)</span>
@@ -828,8 +828,8 @@ symbols live in <code class="docutils literal notranslate"><span class="pre">nam
 <span class="c1">#include &lt;viz/core/viz_buffer.hpp&gt;</span>
 </pre></div>
 </div>
-<p>Enable <code class="docutils literal notranslate"><span class="pre">BUILD_VIZ</span></code> (default <code class="docutils literal notranslate"><span class="pre">OFF</span></code>; requires Vulkan, the CUDA toolkit, and <code class="docutils literal notranslate"><span class="pre">glslangValidator</span></code>)
-and link the relevant CMake target:</p>
+<p><code class="docutils literal notranslate"><span class="pre">BUILD_VIZ</span></code> auto-enables when Vulkan, the CUDA toolkit, and <code class="docutils literal notranslate"><span class="pre">glslangValidator</span></code> are detected
+(force it with <code class="docutils literal notranslate"><span class="pre">-DBUILD_VIZ=ON</span></code> / <code class="docutils literal notranslate"><span class="pre">-DBUILD_VIZ=OFF</span></code>); link the relevant CMake target:</p>
 <div class="pst-scrollable-table-container"><table class="table">
 <colgroup>
 <col style="width: 18.0%" />
@@ -1031,7 +1031,7 @@ output locations.</p>
 
   <p class="copyright">
     
-      Copyright © 2025-2026, NVIDIA CORPORATION &amp; AFFILIATES, last updated on June 30, 2026.
+      Copyright © 2025-2026, NVIDIA CORPORATION &amp; AFFILIATES, last updated on July 01, 2026.
       <br/>
     
   </p>
