@@ -500,3 +500,188 @@ class TestJointRateLimiter:
         _set_joint_input(r, inputs, [3.0] * 5)
         r.compute(inputs, outputs, _make_context(t_ns=10 * _NS))
         np.testing.assert_allclose(_read_joints(outputs, 5), [0.15] * 5, atol=1e-6)
+
+
+# ===========================================================================
+# Startup homing window
+# ===========================================================================
+
+_HOME_POSE = np.array([0.22, 0.0, 0.12, 0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+_HOME_JOINTS = [0.0, -0.3, 0.6, 0.1, 0.0]
+
+
+class TestEePoseStartupHoming:
+    """The startup homing window of the EE-pose limiter."""
+
+    def _limiter(self, duration_s: float = 5.0, **cfg_kwargs) -> EePoseRateLimiter:
+        cfg = RateLimiterConfig(startup_duration_s=duration_s, **cfg_kwargs)
+        return EePoseRateLimiter(name="ee_homing", config=cfg, home_pose=_HOME_POSE)
+
+    def test_homing_requires_home_pose(self):
+        """startup_duration_s > 0 without a home_pose is rejected."""
+        with pytest.raises(ValueError):
+            EePoseRateLimiter(
+                name="bad", config=RateLimiterConfig(startup_duration_s=5.0)
+            )
+
+    def test_degenerate_home_orientation_rejected(self):
+        """A zero home quaternion is rejected at construction."""
+        with pytest.raises(ValueError):
+            EePoseRateLimiter(
+                name="bad",
+                config=RateLimiterConfig(startup_duration_s=5.0),
+                home_pose=np.zeros(7),
+            )
+
+    def test_negative_duration_rejected(self):
+        """A negative startup duration is rejected by the config."""
+        with pytest.raises(ValueError):
+            RateLimiterConfig(startup_duration_s=-1.0)
+
+    def test_input_ignored_during_window(self):
+        """During the window the emitted pose tracks home, not the (wild) input."""
+        r = self._limiter(duration_s=5.0, max_linear_velocity=0.25)
+        inputs, outputs = _build_io(r)
+        # Controller starts far away and keeps moving: must be ignored.
+        _set_pose_input(r, inputs, [0.9, -0.5, 0.8])
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+        np.testing.assert_allclose(_read_pose(outputs)[:3], _HOME_POSE[:3], atol=1e-6)
+
+        _set_pose_input(r, inputs, [-0.9, 0.5, -0.8])
+        r.compute(inputs, outputs, _make_context(t_ns=20_000_000))
+        np.testing.assert_allclose(_read_pose(outputs)[:3], _HOME_POSE[:3], atol=1e-6)
+
+    def test_after_window_input_is_tracked(self):
+        """Past the window the limiter resumes normal (rate-limited) tracking."""
+        r = self._limiter(duration_s=1.0, max_linear_velocity=0.25)
+        inputs, outputs = _build_io(r)
+        _set_pose_input(r, inputs, [0.9, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=0))  # homing
+
+        # t = 2 s > 1 s window: input close to home is tracked exactly.
+        near = _HOME_POSE[:3] + np.array([0.001, 0.0, 0.0])
+        _set_pose_input(r, inputs, near)
+        r.compute(inputs, outputs, _make_context(t_ns=2 * _NS))
+        np.testing.assert_allclose(_read_pose(outputs)[:3], near, atol=1e-6)
+
+    def test_reset_rehomes_boundedly_from_last_command(self):
+        """A reset re-arms the window and slews home from the last emitted pose."""
+        r = self._limiter(duration_s=5.0, max_linear_velocity=0.25, max_dt=0.1)
+        inputs, outputs = _build_io(r)
+        r.compute(inputs, outputs, _make_context(t_ns=0))  # homing latch at home
+
+        # Drive away after the window would matter -- simulate mid-task pose by
+        # walking the limiter to a far pose past the window.
+        far = _HOME_POSE[:3] + np.array([0.3, 0.0, 0.0])
+        t = 6 * _NS
+        for k in range(200):
+            _set_pose_input(r, inputs, far)
+            r.compute(inputs, outputs, _make_context(t_ns=t + k * 20_000_000))
+        drifted = _read_pose(outputs)[:3]
+        assert drifted[0] > _HOME_POSE[0] + 0.2  # actually moved away
+
+        # Reset: homing re-arms; first frame steps TOWARD home from the last
+        # command, bounded by max_linear_velocity * dt (no snap).
+        _set_pose_input(r, inputs, far)  # controller still parked far away
+        t2 = t + 300 * 20_000_000
+        r.compute(inputs, outputs, _make_context(reset=True, t_ns=t2))
+        after_reset = _read_pose(outputs)[:3]
+        step = float(np.linalg.norm(after_reset - drifted))
+        # float32 pose storage rounds the step by a few ulps; 1e-6 m slack.
+        assert step <= 0.25 * 0.1 + 1e-6  # bounded first homing step
+        # And it moved toward home, not toward the controller.
+        assert abs(after_reset[0] - _HOME_POSE[0]) < abs(drifted[0] - _HOME_POSE[0])
+
+    def test_homing_converges_to_home(self):
+        """Within the window the emitted pose converges to home and stays there."""
+        r = self._limiter(duration_s=5.0, max_linear_velocity=0.25)
+        inputs, outputs = _build_io(r)
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+        # Walk 3 s of frames with the controller somewhere wild.
+        for k in range(1, 150):
+            _set_pose_input(r, inputs, [0.9, -0.5, 0.8])
+            r.compute(inputs, outputs, _make_context(t_ns=k * 20_000_000))
+        np.testing.assert_allclose(_read_pose(outputs)[:3], _HOME_POSE[:3], atol=1e-6)
+
+
+class TestJointStartupHoming:
+    """The startup homing window of the joint-space limiter."""
+
+    def _limiter(self, duration_s: float = 5.0, **cfg_kwargs) -> JointRateLimiter:
+        cfg = RateLimiterConfig(startup_duration_s=duration_s, **cfg_kwargs)
+        return JointRateLimiter(
+            name="joint_homing",
+            joint_names=_JOINTS,
+            config=cfg,
+            home_targets=_HOME_JOINTS,
+        )
+
+    def test_homing_requires_home_targets(self):
+        """startup_duration_s > 0 without home_targets is rejected."""
+        with pytest.raises(ValueError):
+            JointRateLimiter(
+                name="bad",
+                joint_names=_JOINTS,
+                config=RateLimiterConfig(startup_duration_s=5.0),
+            )
+
+    def test_home_targets_shape_checked(self):
+        """home_targets with the wrong length is rejected."""
+        with pytest.raises(ValueError):
+            JointRateLimiter(
+                name="bad",
+                joint_names=_JOINTS,
+                config=RateLimiterConfig(startup_duration_s=5.0),
+                home_targets=[0.0, 1.0],
+            )
+
+    def test_input_ignored_during_window(self):
+        """During the window the emitted targets track home, not the leader."""
+        r = self._limiter(duration_s=5.0)
+        inputs, outputs = _build_io(r)
+        _set_joint_input(r, inputs, [2.0] * 5)  # leader parked somewhere wild
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+        np.testing.assert_allclose(_read_joints(outputs, 5), _HOME_JOINTS, atol=1e-6)
+
+    def test_after_window_input_is_tracked(self):
+        """Past the window the limiter resumes normal (rate-limited) tracking."""
+        r = self._limiter(duration_s=1.0, max_joint_velocity=1.5)
+        inputs, outputs = _build_io(r)
+        r.compute(inputs, outputs, _make_context(t_ns=0))  # homing
+
+        near = [h + 0.01 for h in _HOME_JOINTS]
+        _set_joint_input(r, inputs, near)
+        r.compute(inputs, outputs, _make_context(t_ns=2 * _NS))
+        np.testing.assert_allclose(_read_joints(outputs, 5), near, atol=1e-6)
+
+    def test_reset_rehomes_boundedly(self):
+        """A reset re-arms homing; the first step toward home is velocity-bounded."""
+        r = self._limiter(duration_s=5.0, max_joint_velocity=1.5, max_dt=0.1)
+        inputs, outputs = _build_io(r)
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        # Walk past the window to a far leader pose.
+        t = 6 * _NS
+        for k in range(100):
+            _set_joint_input(r, inputs, [2.0] * 5)
+            r.compute(inputs, outputs, _make_context(t_ns=t + k * 20_000_000))
+        drifted = _read_joints(outputs, 5)
+        assert drifted[0] > 1.0  # actually moved away from home
+
+        # Reset with the leader still far away: step must go TOWARD home,
+        # bounded by max_joint_velocity * max_dt.
+        _set_joint_input(r, inputs, [2.0] * 5)
+        r.compute(inputs, outputs, _make_context(reset=True, t_ns=t + 200 * 20_000_000))
+        after = _read_joints(outputs, 5)
+        np.testing.assert_array_less(np.abs(after - drifted), 1.5 * 0.1 + 1e-9)
+        assert abs(after[0] - _HOME_JOINTS[0]) < abs(drifted[0] - _HOME_JOINTS[0])
+
+    def test_homing_converges_to_home(self):
+        """Within the window the emitted targets converge to home and stay."""
+        r = self._limiter(duration_s=5.0, max_joint_velocity=1.5)
+        inputs, outputs = _build_io(r)
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+        for k in range(1, 150):
+            _set_joint_input(r, inputs, [2.0] * 5)
+            r.compute(inputs, outputs, _make_context(t_ns=k * 20_000_000))
+        np.testing.assert_allclose(_read_joints(outputs, 5), _HOME_JOINTS, atol=1e-6)

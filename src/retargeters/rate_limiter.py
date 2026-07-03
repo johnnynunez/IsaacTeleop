@@ -107,6 +107,13 @@ class RateLimiterConfig:
             treated as ``max_dt``.
         min_dt: Lower clamp [s] on the wall-clock frame delta, guarding against
             zero/near-zero deltas producing a frozen limiter.
+        startup_duration_s: Length [s] of the startup homing window. While active
+            (the first ``startup_duration_s`` seconds after construction and after
+            every reset), the limiter **ignores its input entirely** and drives
+            toward the node's configured home command at the normal velocity
+            limits, so session start / episode reset always returns the arm to a
+            known pose regardless of the teleop device's state. ``0`` (default)
+            disables the window. Nodes require a home command when this is > 0.
     """
 
     max_linear_velocity: float = 0.25
@@ -116,6 +123,7 @@ class RateLimiterConfig:
     nominal_dt: float = 1.0 / 60.0
     max_dt: float = 0.1
     min_dt: float = 1e-4
+    startup_duration_s: float = 0.0
 
     def __post_init__(self) -> None:
         if self.max_linear_velocity <= 0.0:
@@ -129,6 +137,8 @@ class RateLimiterConfig:
                 raise ValueError(f"joint_velocity_overrides[{name!r}] must be > 0")
         if not 0.0 < self.min_dt <= self.nominal_dt <= self.max_dt:
             raise ValueError("require 0 < min_dt <= nominal_dt <= max_dt")
+        if self.startup_duration_s < 0.0:
+            raise ValueError("startup_duration_s must be >= 0")
 
 
 def _clamped_dt(
@@ -237,20 +247,58 @@ class EePoseRateLimiter(BaseRetargeter):
     baseline; each later frame is clamped to ``max_linear_velocity * dt`` [m] and
     ``max_angular_velocity * dt`` [rad] from the last **emitted** pose (see the
     module docstring for the dt and reset semantics).
+
+    With ``config.startup_duration_s > 0`` (requires ``home_pose``), the node adds
+    a **startup homing window**: for that long after construction and after every
+    reset the input is ignored entirely and the emitted pose slews from the last
+    emitted command toward ``home_pose`` at the configured velocity limits, so a
+    session start / episode reset always returns the arm to a known pose no matter
+    what the teleop device is doing. On reset the baseline is deliberately kept
+    (not cleared): the last emitted command is the best available proxy for where
+    the follower physically is, and homing from it is what makes the return
+    bounded instead of a snap.
     """
 
-    def __init__(self, name: str, config: RateLimiterConfig | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        config: RateLimiterConfig | None = None,
+        home_pose: np.ndarray | None = None,
+    ) -> None:
         """Initialize the EE-pose rate limiter.
 
         Args:
             name: Name identifier for this retargeter node.
-            config: Velocity limits and dt clamping; ``None`` uses the
-                conservative :class:`RateLimiterConfig` defaults.
+            config: Velocity limits, dt clamping, and startup homing window;
+                ``None`` uses the conservative :class:`RateLimiterConfig` defaults.
+            home_pose: 7-D home command ``[x, y, z, qx, qy, qz, qw]`` (base frame,
+                same convention as the governed stream) targeted during the
+                startup homing window. Required when
+                ``config.startup_duration_s > 0``; ignored otherwise.
         """
         self._cfg = config if config is not None else RateLimiterConfig()
+        if self._cfg.startup_duration_s > 0.0:
+            if home_pose is None:
+                raise ValueError(
+                    "startup_duration_s > 0 requires a home_pose for EePoseRateLimiter"
+                )
+            home = np.asarray(home_pose, dtype=np.float64)
+            if home.shape != (7,):
+                raise ValueError(f"home_pose must have shape (7,), got {home.shape}")
+            home_ori = _quat_normalize(home[3:7])
+            if home_ori is None:
+                raise ValueError("home_pose orientation quaternion is degenerate")
+            self._home_pose: np.ndarray | None = np.concatenate([home[:3], home_ori])
+        else:
+            self._home_pose = None
         super().__init__(name=name)
         self._last_pose: np.ndarray | None = None
         self._last_time_ns: int | None = None
+        # Startup homing window bookkeeping: armed at construction and on every
+        # reset; the deadline is materialized from the first context seen after
+        # arming (the node has no clock of its own).
+        self._homing_armed = self._home_pose is not None
+        self._homing_until_ns: int | None = None
 
     def input_spec(self) -> RetargeterIOType:
         """Requires an (optional) absolute 7-D ``ee_pose`` to govern."""
@@ -280,16 +328,71 @@ class EePoseRateLimiter(BaseRetargeter):
             )
         }
 
+    def _homing_active(self, now_ns: int) -> bool:
+        """Whether the startup homing window is active at ``now_ns`` (and lazily arms it)."""
+        if self._home_pose is None:
+            return False
+        if self._homing_armed:
+            self._homing_armed = False
+            self._homing_until_ns = now_ns + int(self._cfg.startup_duration_s * 1e9)
+        return self._homing_until_ns is not None and now_ns < self._homing_until_ns
+
+    def _step_toward(self, target: np.ndarray, now_ns: int) -> np.ndarray:
+        """One rate-limited step from the last emitted pose toward ``target`` (7-D)."""
+        assert self._last_pose is not None
+        dt = _clamped_dt(
+            self._last_time_ns,
+            now_ns,
+            self._cfg.nominal_dt,
+            self._cfg.min_dt,
+            self._cfg.max_dt,
+        )
+        pos = _clamp_position_step(
+            target[:3], self._last_pose[:3], self._cfg.max_linear_velocity * dt
+        )
+        ori = _clamp_orientation_step(
+            target[3:7], self._last_pose[3:7], self._cfg.max_angular_velocity * dt
+        )
+        return np.concatenate([pos, ori])
+
     def _compute_fn(self, inputs: RetargeterIO, outputs: RetargeterIO, context) -> None:
         """Emits the input pose clamped to the configured per-frame step."""
+        now_ns = int(context.graph_time.real_time_ns)
+
         if context.execution_events.reset:
-            # Fresh episode: forget the baseline. The next valid frame passes
-            # through and re-latches -- clamping against the stale pre-reset pose
-            # would command a long cross-workspace slew.
-            self._last_pose = None
-            self._last_time_ns = None
+            if self._home_pose is not None:
+                # Fresh episode with startup homing: KEEP the baseline (the last
+                # emitted command is the best proxy for where the follower
+                # physically is) and re-arm the homing window, so the return to
+                # home is a bounded slew instead of a snap.
+                self._homing_armed = True
+                self._homing_until_ns = None
+            else:
+                # Fresh episode without homing: forget the baseline. The next
+                # valid frame passes through and re-latches -- clamping against
+                # the stale pre-reset pose would command a long slew.
+                self._last_pose = None
+                self._last_time_ns = None
 
         out = outputs[EE_POSE_KEY]
+
+        if self._homing_active(now_ns):
+            # Startup homing window: ignore the input entirely and slew toward
+            # the configured home at the normal velocity limits.
+            assert self._home_pose is not None
+            if self._last_pose is None:
+                # Nothing emitted yet (cold start): command home directly. The
+                # deployment contract is the same as the upstream clutch's
+                # reset-origin -- the owning task parks the arm at/near home, so
+                # this does not command a cross-workspace jump.
+                homed = self._home_pose.copy()
+            else:
+                homed = self._step_toward(self._home_pose, now_ns)
+            self._last_pose = homed
+            self._last_time_ns = now_ns
+            out[0] = homed.astype(np.float32)
+            return
+
         inp = inputs[EE_POSE_KEY]
         if inp.is_none:
             # Dropped frame: hold the last emitted pose (upstream convention).
@@ -308,31 +411,17 @@ class EePoseRateLimiter(BaseRetargeter):
             # First valid frame: pass through, latch the baseline.
             latched = np.concatenate([pose[:3], ori])
             self._last_pose = latched
-            self._last_time_ns = int(context.graph_time.real_time_ns)
+            self._last_time_ns = now_ns
             out[0] = latched.astype(np.float32)
             return
 
-        now_ns = int(context.graph_time.real_time_ns)
-        dt = _clamped_dt(
-            self._last_time_ns,
-            now_ns,
-            self._cfg.nominal_dt,
-            self._cfg.min_dt,
-            self._cfg.max_dt,
-        )
-
-        pos = _clamp_position_step(
-            pose[:3], self._last_pose[:3], self._cfg.max_linear_velocity * dt
-        )
         if ori is None:
             # Degenerate target orientation: keep the last emitted one.
-            ori_limited = self._last_pose[3:7]
+            target = np.concatenate([pose[:3], self._last_pose[3:7]])
         else:
-            ori_limited = _clamp_orientation_step(
-                ori, self._last_pose[3:7], self._cfg.max_angular_velocity * dt
-            )
+            target = np.concatenate([pose[:3], ori])
 
-        limited = np.concatenate([pos, ori_limited])
+        limited = self._step_toward(target, now_ns)
         self._last_pose = limited
         self._last_time_ns = now_ns
         out[0] = limited.astype(np.float32)
@@ -351,6 +440,13 @@ class JointRateLimiter(BaseRetargeter):
     The first valid frame after construction / reset passes through and latches the
     baseline (startup alignment is owned upstream); later frames are clamped
     against the last **emitted** targets (see the module docstring).
+
+    With ``config.startup_duration_s > 0`` (requires ``home_targets``), the node
+    adds a **startup homing window**: for that long after construction and after
+    every reset the input is ignored entirely and the emitted targets slew from
+    the last emitted command toward ``home_targets`` at the per-joint limits (see
+    :class:`EePoseRateLimiter` for the rationale; the reset baseline is kept, not
+    cleared, so the return to home is a bounded slew).
     """
 
     def __init__(
@@ -358,6 +454,7 @@ class JointRateLimiter(BaseRetargeter):
         name: str,
         joint_names: list[str],
         config: RateLimiterConfig | None = None,
+        home_targets: list[float] | np.ndarray | None = None,
     ) -> None:
         """Initialize the joint-space rate limiter.
 
@@ -365,8 +462,11 @@ class JointRateLimiter(BaseRetargeter):
             name: Name identifier for this retargeter node.
             joint_names: Ordered joint names; must match the upstream producer's
                 output element names/order (checked by the graph at connect time).
-            config: Velocity limits and dt clamping; ``None`` uses the
-                conservative :class:`RateLimiterConfig` defaults.
+            config: Velocity limits, dt clamping, and startup homing window;
+                ``None`` uses the conservative :class:`RateLimiterConfig` defaults.
+            home_targets: Per-joint home command (same order and units as
+                ``joint_names``) targeted during the startup homing window.
+                Required when ``config.startup_duration_s > 0``; ignored otherwise.
         """
         if not joint_names:
             raise ValueError("joint_names must be non-empty")
@@ -377,6 +477,20 @@ class JointRateLimiter(BaseRetargeter):
             raise ValueError(
                 f"joint_velocity_overrides for unknown joints: {sorted(unknown)}"
             )
+        if self._cfg.startup_duration_s > 0.0:
+            if home_targets is None:
+                raise ValueError(
+                    "startup_duration_s > 0 requires home_targets for JointRateLimiter"
+                )
+            home = np.asarray(home_targets, dtype=np.float64)
+            if home.shape != (len(self._joint_names),):
+                raise ValueError(
+                    f"home_targets must have shape ({len(self._joint_names)},), "
+                    f"got {home.shape}"
+                )
+            self._home_targets: np.ndarray | None = home.copy()
+        else:
+            self._home_targets = None
         super().__init__(name=name)
         self._limits = np.array(
             [
@@ -387,6 +501,9 @@ class JointRateLimiter(BaseRetargeter):
         )
         self._last_targets: np.ndarray | None = None
         self._last_time_ns: int | None = None
+        # Startup homing window bookkeeping (see EePoseRateLimiter).
+        self._homing_armed = self._home_targets is not None
+        self._homing_until_ns: int | None = None
 
     def input_spec(self) -> RetargeterIOType:
         """Requires an (optional) name-keyed joint-target group to govern."""
@@ -406,16 +523,64 @@ class JointRateLimiter(BaseRetargeter):
             )
         }
 
+    def _homing_active(self, now_ns: int) -> bool:
+        """Whether the startup homing window is active at ``now_ns`` (and lazily arms it)."""
+        if self._home_targets is None:
+            return False
+        if self._homing_armed:
+            self._homing_armed = False
+            self._homing_until_ns = now_ns + int(self._cfg.startup_duration_s * 1e9)
+        return self._homing_until_ns is not None and now_ns < self._homing_until_ns
+
+    def _step_toward(self, targets: np.ndarray, now_ns: int) -> np.ndarray:
+        """One rate-limited step from the last emitted targets toward ``targets``."""
+        assert self._last_targets is not None
+        dt = _clamped_dt(
+            self._last_time_ns,
+            now_ns,
+            self._cfg.nominal_dt,
+            self._cfg.min_dt,
+            self._cfg.max_dt,
+        )
+        max_step = self._limits * dt
+        delta = np.clip(targets - self._last_targets, -max_step, max_step)
+        return self._last_targets + delta
+
     def _compute_fn(self, inputs: RetargeterIO, outputs: RetargeterIO, context) -> None:
         """Emits the input targets clamped to the configured per-frame step."""
+        now_ns = int(context.graph_time.real_time_ns)
+
         if context.execution_events.reset:
-            # Fresh episode: forget the baseline (see EePoseRateLimiter).
-            self._last_targets = None
-            self._last_time_ns = None
+            if self._home_targets is not None:
+                # Fresh episode with startup homing: keep the baseline and re-arm
+                # the homing window (see EePoseRateLimiter).
+                self._homing_armed = True
+                self._homing_until_ns = None
+            else:
+                # Fresh episode without homing: forget the baseline.
+                self._last_targets = None
+                self._last_time_ns = None
 
         out = outputs[JOINT_TARGETS_KEY]
-        jin = inputs[JOINT_TARGETS_KEY]
         n = len(self._joint_names)
+
+        if self._homing_active(now_ns):
+            # Startup homing window: ignore the input entirely and slew toward
+            # the configured home targets at the per-joint limits.
+            assert self._home_targets is not None
+            if self._last_targets is None:
+                # Cold start: command home directly (the owning task parks the
+                # arm at/near home; same contract as the upstream align slew).
+                homed = self._home_targets.copy()
+            else:
+                homed = self._step_toward(self._home_targets, now_ns)
+            self._last_targets = homed
+            self._last_time_ns = now_ns
+            for i in range(n):
+                out[i] = float(homed[i])
+            return
+
+        jin = inputs[JOINT_TARGETS_KEY]
         if jin.is_none:
             # Dropped frame: hold the last emitted targets.
             if self._last_targets is not None:
@@ -428,23 +593,12 @@ class JointRateLimiter(BaseRetargeter):
         if self._last_targets is None:
             # First valid frame: pass through, latch the baseline.
             self._last_targets = targets
-            self._last_time_ns = int(context.graph_time.real_time_ns)
+            self._last_time_ns = now_ns
             for i in range(n):
                 out[i] = float(targets[i])
             return
 
-        now_ns = int(context.graph_time.real_time_ns)
-        dt = _clamped_dt(
-            self._last_time_ns,
-            now_ns,
-            self._cfg.nominal_dt,
-            self._cfg.min_dt,
-            self._cfg.max_dt,
-        )
-
-        max_step = self._limits * dt
-        delta = np.clip(targets - self._last_targets, -max_step, max_step)
-        limited = self._last_targets + delta
+        limited = self._step_toward(targets, now_ns)
         self._last_targets = limited
         self._last_time_ns = now_ns
         for i in range(n):
