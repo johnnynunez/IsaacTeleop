@@ -56,6 +56,7 @@ from isaacteleop.retargeting_engine.interface import (
     BaseRetargeter,
     RetargeterIOType,
 )
+from isaacteleop.retargeting_engine.interface.execution_events import ExecutionState
 from isaacteleop.retargeting_engine.interface.retargeter_core_types import RetargeterIO
 from isaacteleop.retargeting_engine.interface.tensor_group_type import (
     OptionalType,
@@ -107,13 +108,15 @@ class RateLimiterConfig:
             treated as ``max_dt``.
         min_dt: Lower clamp [s] on the wall-clock frame delta, guarding against
             zero/near-zero deltas producing a frozen limiter.
-        startup_duration_s: Length [s] of the startup homing window. While active
-            (the first ``startup_duration_s`` seconds after construction and after
-            every reset), the limiter **ignores its input entirely** and drives
+        startup_duration_s: Length [s] of the startup homing window. The window
+            arms at construction, on every reset, and on every **engage edge**
+            (an execution-state transition into ``RUNNING`` -- the teleop
+            client's "Play", whether from Stop, Pause, or a fresh connect).
+            While active, the limiter **ignores its input entirely** and drives
             toward the node's configured home command at the normal velocity
-            limits, so session start / episode reset always returns the arm to a
-            known pose regardless of the teleop device's state. ``0`` (default)
-            disables the window. Nodes require a home command when this is > 0.
+            limits, so pressing Play always returns the arm to a known pose
+            regardless of the teleop device's state. ``0`` (default) disables
+            the window. Nodes require a home command when this is > 0.
     """
 
     max_linear_velocity: float = 0.25
@@ -294,11 +297,13 @@ class EePoseRateLimiter(BaseRetargeter):
         super().__init__(name=name)
         self._last_pose: np.ndarray | None = None
         self._last_time_ns: int | None = None
-        # Startup homing window bookkeeping: armed at construction and on every
-        # reset; the deadline is materialized from the first context seen after
+        # Startup homing window bookkeeping: armed at construction, on every
+        # reset, and on every engage edge into RUNNING (the client's "Play");
+        # the deadline is materialized from the first context seen after
         # arming (the node has no clock of its own).
         self._homing_armed = self._home_pose is not None
         self._homing_until_ns: int | None = None
+        self._prev_state: ExecutionState | None = None
 
     def input_spec(self) -> RetargeterIOType:
         """Requires an (optional) absolute 7-D ``ee_pose`` to govern."""
@@ -358,13 +363,23 @@ class EePoseRateLimiter(BaseRetargeter):
     def _compute_fn(self, inputs: RetargeterIO, outputs: RetargeterIO, context) -> None:
         """Emits the input pose clamped to the configured per-frame step."""
         now_ns = int(context.graph_time.real_time_ns)
+        state = context.execution_events.execution_state
+        # Engage edge: any transition INTO RUNNING (the client's "Play", whether
+        # from Stop, Pause, or the very first frame) re-arms the homing window.
+        play_edge = (
+            state == ExecutionState.RUNNING
+            and self._prev_state != ExecutionState.RUNNING
+        )
+        self._prev_state = state
 
-        if context.execution_events.reset:
+        if context.execution_events.reset or (
+            play_edge and self._home_pose is not None
+        ):
             if self._home_pose is not None:
-                # Fresh episode with startup homing: KEEP the baseline (the last
-                # emitted command is the best proxy for where the follower
-                # physically is) and re-arm the homing window, so the return to
-                # home is a bounded slew instead of a snap.
+                # Fresh episode / Play with startup homing: KEEP the baseline
+                # (the last emitted command is the best proxy for where the
+                # follower physically is) and re-arm the homing window, so the
+                # return to home is a bounded slew instead of a snap.
                 self._homing_armed = True
                 self._homing_until_ns = None
             else:
@@ -504,6 +519,7 @@ class JointRateLimiter(BaseRetargeter):
         # Startup homing window bookkeeping (see EePoseRateLimiter).
         self._homing_armed = self._home_targets is not None
         self._homing_until_ns: int | None = None
+        self._prev_state: ExecutionState | None = None
 
     def input_spec(self) -> RetargeterIOType:
         """Requires an (optional) name-keyed joint-target group to govern."""
@@ -549,11 +565,20 @@ class JointRateLimiter(BaseRetargeter):
     def _compute_fn(self, inputs: RetargeterIO, outputs: RetargeterIO, context) -> None:
         """Emits the input targets clamped to the configured per-frame step."""
         now_ns = int(context.graph_time.real_time_ns)
+        state = context.execution_events.execution_state
+        # Engage edge into RUNNING (the client's "Play") re-arms homing.
+        play_edge = (
+            state == ExecutionState.RUNNING
+            and self._prev_state != ExecutionState.RUNNING
+        )
+        self._prev_state = state
 
-        if context.execution_events.reset:
+        if context.execution_events.reset or (
+            play_edge and self._home_targets is not None
+        ):
             if self._home_targets is not None:
-                # Fresh episode with startup homing: keep the baseline and re-arm
-                # the homing window (see EePoseRateLimiter).
+                # Fresh episode / Play with startup homing: keep the baseline and
+                # re-arm the homing window (see EePoseRateLimiter).
                 self._homing_armed = True
                 self._homing_until_ns = None
             else:

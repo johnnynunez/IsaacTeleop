@@ -685,3 +685,108 @@ class TestJointStartupHoming:
             _set_joint_input(r, inputs, [2.0] * 5)
             r.compute(inputs, outputs, _make_context(t_ns=k * 20_000_000))
         np.testing.assert_allclose(_read_joints(outputs, 5), _HOME_JOINTS, atol=1e-6)
+
+
+class TestPlayEdgeRehoming:
+    """Every transition into RUNNING (the client's Play) re-arms the homing window."""
+
+    def _ee_limiter(self, duration_s: float = 2.0) -> EePoseRateLimiter:
+        cfg = RateLimiterConfig(
+            startup_duration_s=duration_s, max_linear_velocity=0.25, max_dt=0.1
+        )
+        return EePoseRateLimiter(name="ee_play", config=cfg, home_pose=_HOME_POSE)
+
+    def _run_past_window(self, r, inputs, outputs, t0_ns: int) -> int:
+        """Walk the limiter past its homing window to a far pose; returns end time."""
+        t = t0_ns
+        far = _HOME_POSE[:3] + np.array([0.3, 0.0, 0.0])
+        for k in range(300):
+            t = t0_ns + k * 20_000_000
+            _set_pose_input(r, inputs, far)
+            r.compute(inputs, outputs, _make_context(t_ns=t))
+        return t
+
+    def test_pause_then_play_rehomes(self):
+        """PAUSED -> RUNNING re-arms homing: the arm returns toward home on Play."""
+        r = self._ee_limiter(duration_s=2.0)
+        inputs, outputs = _build_io(r)
+        r.compute(inputs, outputs, _make_context(t_ns=0))  # first frame: homing
+        t = self._run_past_window(r, inputs, outputs, 3 * _NS)
+        drifted = _read_pose(outputs)[:3]
+        assert drifted[0] > _HOME_POSE[0] + 0.2
+
+        # Pause (state != RUNNING): the operator parks; the held command stays at
+        # the drifted pose. Then Play again with the controller far away.
+        _set_pose_input(r, inputs, drifted)
+        r.compute(
+            inputs, outputs, _make_context(state=ExecutionState.PAUSED, t_ns=t + _NS)
+        )
+        _set_pose_input(r, inputs, drifted + np.array([0.2, 0.0, 0.0]))
+        r.compute(inputs, outputs, _make_context(t_ns=t + 2 * _NS))  # Play edge
+        after_play = _read_pose(outputs)[:3]
+        # Moved toward home (input ignored), by a bounded step.
+        assert abs(after_play[0] - _HOME_POSE[0]) < abs(drifted[0] - _HOME_POSE[0])
+        assert np.linalg.norm(after_play - drifted) <= 0.25 * 0.1 + 1e-6
+
+    def test_stop_then_play_rehomes_joint(self):
+        """STOPPED -> RUNNING re-arms homing on the joint limiter too."""
+        cfg = RateLimiterConfig(
+            startup_duration_s=2.0, max_joint_velocity=1.5, max_dt=0.1
+        )
+        r = JointRateLimiter(
+            name="joint_play",
+            joint_names=_JOINTS,
+            config=cfg,
+            home_targets=_HOME_JOINTS,
+        )
+        inputs, outputs = _build_io(r)
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+        # Past the window, drift to a far pose.
+        t = 3 * _NS
+        for k in range(300):
+            t = 3 * _NS + k * 20_000_000
+            _set_joint_input(r, inputs, [2.0] * 5)
+            r.compute(inputs, outputs, _make_context(t_ns=t))
+        drifted = _read_joints(outputs, 5)
+        assert drifted[0] > 1.0
+
+        _set_joint_input(r, inputs, [2.0] * 5)
+        r.compute(
+            inputs, outputs, _make_context(state=ExecutionState.STOPPED, t_ns=t + _NS)
+        )
+        _set_joint_input(r, inputs, [2.0] * 5)
+        r.compute(inputs, outputs, _make_context(t_ns=t + 2 * _NS))  # Play edge
+        after = _read_joints(outputs, 5)
+        assert abs(after[0] - _HOME_JOINTS[0]) < abs(drifted[0] - _HOME_JOINTS[0])
+        np.testing.assert_array_less(np.abs(after - drifted), 1.5 * 0.1 + 1e-6)
+
+    def test_no_rehome_while_continuously_running(self):
+        """Staying in RUNNING (no edge) does NOT re-arm homing mid-task."""
+        r = self._ee_limiter(duration_s=1.0)
+        inputs, outputs = _build_io(r)
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+        t = self._run_past_window(r, inputs, outputs, 2 * _NS)
+        drifted = _read_pose(outputs)[:3]
+        assert drifted[0] > _HOME_POSE[0] + 0.2
+
+        # Next RUNNING frame with a nearby target: normal tracking, no homing.
+        near = drifted + np.array([0.001, 0.0, 0.0])
+        _set_pose_input(r, inputs, near)
+        r.compute(inputs, outputs, _make_context(t_ns=t + 20_000_000))
+        np.testing.assert_allclose(_read_pose(outputs)[:3], near, atol=1e-6)
+
+    def test_play_edge_without_homing_keeps_plain_behavior(self):
+        """A limiter without a homing window ignores Play edges (no state reset)."""
+        cfg = RateLimiterConfig(max_linear_velocity=0.25)
+        r = EePoseRateLimiter(name="plain", config=cfg)
+        inputs, outputs = _build_io(r)
+        _set_pose_input(r, inputs, [0.2, 0.0, 0.1])
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+        # Pause then Play: baseline must be kept (still rate-limits from it).
+        _set_pose_input(r, inputs, [0.2, 0.0, 0.1])
+        r.compute(inputs, outputs, _make_context(state=ExecutionState.PAUSED, t_ns=_NS))
+        _set_pose_input(r, inputs, [0.9, 0.0, 0.1])  # far target on the Play frame
+        r.compute(inputs, outputs, _make_context(t_ns=2 * _NS))
+        pos = _read_pose(outputs)[:3]
+        # Clamped from the old baseline, not a pass-through re-latch.
+        assert pos[0] < 0.3
