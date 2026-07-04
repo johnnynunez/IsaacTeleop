@@ -40,10 +40,21 @@ Both limiters are pure trajectory governors:
 - A pipeline **reset** clears the baseline: the next valid frame passes through
   and re-latches (the owning task resets the arm pose; re-clamping against a
   stale pre-reset baseline would slew the arm across the workspace).
+- **Anomaly rejection** (second tier, above the clamp): a frame whose *input*
+  velocity relative to the last accepted input exceeds the ``reject_*``
+  thresholds is a discontinuity -- an IK divergence, a tracking teleport, a
+  stream catch-up step -- not motion to follow, and is **not executed at all**:
+  the limiter holds the last emitted command instead of slewing toward the
+  anomaly. After ``max_consecutive_rejections`` consecutive anomalous frames the
+  input is treated as a persistent new target and re-accepted (still velocity
+  clamped), so rejection cannot deadlock the pipeline; ``None`` holds
+  indefinitely until the input returns within the envelope or a reset arrives.
 
-The clamp is intentionally a hard per-frame velocity bound (a first-order rate
-limiter), not a smoothing filter: it adds no lag below the limit -- teleop feel is
-untouched until the harness actually has to intervene.
+The result is a three-band governor: normal motion passes through untouched,
+modest overshoot is clamped to the velocity limit, and wild discontinuity is
+refused outright. The clamp is intentionally a hard per-frame velocity bound (a
+first-order rate limiter), not a smoothing filter: it adds no lag below the
+limit -- teleop feel is untouched until the harness actually has to intervene.
 """
 
 from __future__ import annotations
@@ -107,6 +118,29 @@ class RateLimiterConfig:
             treated as ``max_dt``.
         min_dt: Lower clamp [s] on the wall-clock frame delta, guarding against
             zero/near-zero deltas producing a frozen limiter.
+        reject_linear_velocity: EE limiter only -- input linear speed [m/s]
+            (measured against the last **accepted input**, over the clamped
+            ``dt``) above which the frame is rejected outright instead of being
+            approached at the clamp limit. ``None`` (default) disables
+            rejection. Must be >= ``max_linear_velocity`` when set: a rejection
+            threshold below the clamp limit would refuse motion the clamp band
+            is meant to allow.
+        reject_angular_velocity: EE limiter only -- input angular speed [rad/s]
+            above which the frame is rejected outright. ``None`` disables.
+            Must be >= ``max_angular_velocity`` when set.
+        reject_joint_velocity: Joint limiter only -- per-joint input speed
+            [rad/s or m/s] above which the whole frame is rejected outright
+            (any single joint over the threshold rejects the frame -- joints
+            move together; executing the sane joints of an insane frame still
+            produces an insane configuration). ``None`` disables. Must be
+            >= ``max_joint_velocity`` and every ``joint_velocity_overrides``
+            entry when set.
+        max_consecutive_rejections: Number of consecutive rejected frames after
+            which the input is re-accepted as a persistent new target (then
+            still approached at the clamp limits). Guards against a legitimate
+            regime change (e.g. the leader really did move far during a stream
+            outage) freezing the follower forever. ``None`` holds indefinitely;
+            the default trips after ~1 s of anomalous input at 30 FPS.
     """
 
     max_linear_velocity: float = 0.25
@@ -116,6 +150,10 @@ class RateLimiterConfig:
     nominal_dt: float = 1.0 / 60.0
     max_dt: float = 0.1
     min_dt: float = 1e-4
+    reject_linear_velocity: float | None = None
+    reject_angular_velocity: float | None = None
+    reject_joint_velocity: float | None = None
+    max_consecutive_rejections: int | None = 30
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -136,6 +174,29 @@ class RateLimiterConfig:
                 )
         if not self.min_dt <= self.nominal_dt <= self.max_dt:
             raise ValueError("require 0 < min_dt <= nominal_dt <= max_dt")
+        for reject_name, clamp_name in (
+            ("reject_linear_velocity", "max_linear_velocity"),
+            ("reject_angular_velocity", "max_angular_velocity"),
+            ("reject_joint_velocity", "max_joint_velocity"),
+        ):
+            reject = getattr(self, reject_name)
+            if reject is None:
+                continue
+            if not np.isfinite(reject) or reject <= 0.0:
+                raise ValueError(f"{reject_name} must be finite and > 0")
+            if reject < getattr(self, clamp_name):
+                raise ValueError(f"require {reject_name} >= {clamp_name}")
+        if self.reject_joint_velocity is not None:
+            for name, limit in self.joint_velocity_overrides.items():
+                if self.reject_joint_velocity < limit:
+                    raise ValueError(
+                        "require reject_joint_velocity >= "
+                        f"joint_velocity_overrides[{name!r}]"
+                    )
+        if self.max_consecutive_rejections is not None and (
+            self.max_consecutive_rejections < 1
+        ):
+            raise ValueError("max_consecutive_rejections must be >= 1 or None")
 
 
 def _clamped_dt(
@@ -197,6 +258,12 @@ def _quat_conjugate(q: np.ndarray) -> np.ndarray:
     return np.array([-q[0], -q[1], -q[2], q[3]], dtype=np.float64)
 
 
+def _quat_geodesic_angle(a: np.ndarray, b: np.ndarray) -> float:
+    """Geodesic angle [rad] between two unit quaternions (double-cover aware)."""
+    dot = min(1.0, abs(float(np.dot(a, b))))
+    return 2.0 * float(np.arccos(dot))
+
+
 def _clamp_orientation_step(
     target: np.ndarray, previous: np.ndarray, max_step: float
 ) -> np.ndarray:
@@ -244,6 +311,12 @@ class EePoseRateLimiter(BaseRetargeter):
     baseline; each later frame is clamped to ``max_linear_velocity * dt`` [m] and
     ``max_angular_velocity * dt`` [rad] from the last **emitted** pose (see the
     module docstring for the dt and reset semantics).
+
+    When ``reject_linear_velocity`` / ``reject_angular_velocity`` are set, a frame
+    whose **input** moves faster than those thresholds relative to the last
+    accepted input is rejected outright -- the last emitted pose is held and the
+    anomalous target is never approached (see the module docstring's anomaly
+    rejection tier).
     """
 
     def __init__(self, name: str, config: RateLimiterConfig | None = None) -> None:
@@ -258,6 +331,13 @@ class EePoseRateLimiter(BaseRetargeter):
         super().__init__(name=name)
         self._last_pose: np.ndarray | None = None
         self._last_time_ns: int | None = None
+        # Anomaly-rejection reference: the last *accepted* input (position +
+        # normalized orientation), distinct from the last *emitted* pose -- the
+        # emitted pose lags a far target by design, and measuring input velocity
+        # against it would misread bounded catch-up as an anomaly.
+        self._last_input_pos: np.ndarray | None = None
+        self._last_input_ori: np.ndarray | None = None
+        self._rejections: int = 0
 
     def input_spec(self) -> RetargeterIOType:
         """Requires an (optional) absolute 7-D ``ee_pose`` to govern."""
@@ -287,6 +367,24 @@ class EePoseRateLimiter(BaseRetargeter):
             )
         }
 
+    def _is_anomalous(self, pos: np.ndarray, ori: np.ndarray | None, dt: float) -> bool:
+        """True when the input step from the last accepted input breaks the reject envelope."""
+        cfg = self._cfg
+        if (
+            cfg.reject_linear_velocity is not None
+            and self._last_input_pos is not None
+            and float(np.linalg.norm(pos - self._last_input_pos))
+            > cfg.reject_linear_velocity * dt
+        ):
+            return True
+        return (
+            cfg.reject_angular_velocity is not None
+            and ori is not None
+            and self._last_input_ori is not None
+            and _quat_geodesic_angle(ori, self._last_input_ori)
+            > cfg.reject_angular_velocity * dt
+        )
+
     def _compute_fn(self, inputs: RetargeterIO, outputs: RetargeterIO, context) -> None:
         """Emits the input pose clamped to the configured per-frame step."""
         if context.execution_events.reset:
@@ -295,6 +393,9 @@ class EePoseRateLimiter(BaseRetargeter):
             # would command a long cross-workspace slew.
             self._last_pose = None
             self._last_time_ns = None
+            self._last_input_pos = None
+            self._last_input_ori = None
+            self._rejections = 0
 
         out = outputs[EE_POSE_KEY]
         inp = inputs[EE_POSE_KEY]
@@ -320,6 +421,9 @@ class EePoseRateLimiter(BaseRetargeter):
             latched = np.concatenate([pose[:3], ori])
             self._last_pose = latched
             self._last_time_ns = int(context.graph_time.real_time_ns)
+            self._last_input_pos = pose[:3].copy()
+            self._last_input_ori = ori.copy()
+            self._rejections = 0
             out[0] = latched.astype(np.float32)
             return
 
@@ -332,6 +436,23 @@ class EePoseRateLimiter(BaseRetargeter):
             self._cfg.max_dt,
         )
 
+        if self._is_anomalous(pose[:3], ori, dt):
+            self._rejections += 1
+            cap = self._cfg.max_consecutive_rejections
+            if cap is None or self._rejections <= cap:
+                # Anomalous frame (IK divergence, tracking teleport, stream
+                # catch-up): refuse it entirely -- hold the last emitted pose
+                # and advance no baseline (mirrors the dropped-frame path), so
+                # the arm never starts moving toward a discontinuity.
+                out[0] = self._last_pose.astype(np.float32)
+                return
+            # Cap tripped: the far input is persistent, so it is a new regime,
+            # not a glitch. Fall through and re-accept it -- the clamp below
+            # still bounds the approach velocity.
+            self._rejections = 0
+        else:
+            self._rejections = 0
+
         pos = _clamp_position_step(
             pose[:3], self._last_pose[:3], self._cfg.max_linear_velocity * dt
         )
@@ -343,6 +464,9 @@ class EePoseRateLimiter(BaseRetargeter):
                 ori, self._last_pose[3:7], self._cfg.max_angular_velocity * dt
             )
 
+        self._last_input_pos = pose[:3].copy()
+        if ori is not None:
+            self._last_input_ori = ori.copy()
         limited = np.concatenate([pos, ori_limited])
         self._last_pose = limited
         self._last_time_ns = now_ns
@@ -362,6 +486,12 @@ class JointRateLimiter(BaseRetargeter):
     The first valid frame after construction / reset passes through and latches the
     baseline (startup alignment is owned upstream); later frames are clamped
     against the last **emitted** targets (see the module docstring).
+
+    When ``reject_joint_velocity`` is set, a frame in which **any** joint's input
+    moves faster than that threshold relative to the last accepted input is
+    rejected outright -- the last emitted targets are held and the anomalous
+    frame is never approached (joints move together, so the whole frame is
+    refused; see the module docstring's anomaly rejection tier).
     """
 
     def __init__(
@@ -398,6 +528,11 @@ class JointRateLimiter(BaseRetargeter):
         )
         self._last_targets: np.ndarray | None = None
         self._last_time_ns: int | None = None
+        # Anomaly-rejection reference: the last *accepted* input, distinct from
+        # the last *emitted* targets (which lag a far target by design; measuring
+        # input velocity against them would misread catch-up as an anomaly).
+        self._last_input_targets: np.ndarray | None = None
+        self._rejections: int = 0
 
     def input_spec(self) -> RetargeterIOType:
         """Requires an (optional) name-keyed joint-target group to govern."""
@@ -423,6 +558,8 @@ class JointRateLimiter(BaseRetargeter):
             # Fresh episode: forget the baseline (see EePoseRateLimiter).
             self._last_targets = None
             self._last_time_ns = None
+            self._last_input_targets = None
+            self._rejections = 0
 
         out = outputs[JOINT_TARGETS_KEY]
         jin = inputs[JOINT_TARGETS_KEY]
@@ -445,6 +582,8 @@ class JointRateLimiter(BaseRetargeter):
             # First valid frame: pass through, latch the baseline.
             self._last_targets = targets
             self._last_time_ns = int(context.graph_time.real_time_ns)
+            self._last_input_targets = targets.copy()
+            self._rejections = 0
             for i in range(n):
                 out[i] = float(targets[i])
             return
@@ -458,10 +597,38 @@ class JointRateLimiter(BaseRetargeter):
             self._cfg.max_dt,
         )
 
+        if (
+            self._cfg.reject_joint_velocity is not None
+            and self._last_input_targets is not None
+            and bool(
+                np.any(
+                    np.abs(targets - self._last_input_targets)
+                    > self._cfg.reject_joint_velocity * dt
+                )
+            )
+        ):
+            self._rejections += 1
+            cap = self._cfg.max_consecutive_rejections
+            if cap is None or self._rejections <= cap:
+                # Anomalous frame (e.g. IK output flipping tens of degrees in
+                # one frame): refuse the whole frame -- hold the last emitted
+                # targets and advance no baseline (mirrors the dropped-frame
+                # path), so the servos never start slewing toward it.
+                for i in range(n):
+                    out[i] = float(self._last_targets[i])
+                return
+            # Cap tripped: the far input is persistent -- a new regime, not a
+            # glitch. Fall through and re-accept it; the clamp below still
+            # bounds the approach velocity.
+            self._rejections = 0
+        else:
+            self._rejections = 0
+
         max_step = self._limits * dt
         delta = np.clip(targets - self._last_targets, -max_step, max_step)
         limited = self._last_targets + delta
         self._last_targets = limited
         self._last_time_ns = now_ns
+        self._last_input_targets = targets.copy()
         for i in range(n):
             out[i] = float(limited[i])

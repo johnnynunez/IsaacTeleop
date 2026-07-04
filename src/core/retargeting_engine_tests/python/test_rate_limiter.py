@@ -243,12 +243,34 @@ class TestRateLimiterConfig:
             {"min_dt": 0.0},
             {"min_dt": 0.05, "nominal_dt": 0.02},
             {"nominal_dt": 0.2, "max_dt": 0.1},
+            {"reject_linear_velocity": 0.0},
+            {"reject_linear_velocity": float("nan")},
+            # Rejection threshold below the clamp limit would refuse motion the
+            # clamp band is meant to allow.
+            {"max_linear_velocity": 0.25, "reject_linear_velocity": 0.1},
+            {"max_angular_velocity": 1.5, "reject_angular_velocity": 1.0},
+            {"max_joint_velocity": 1.5, "reject_joint_velocity": 1.0},
+            # ... including per-joint overrides above the rejection threshold.
+            {
+                "joint_velocity_overrides": {"elbow": 5.0},
+                "reject_joint_velocity": 4.0,
+            },
+            {"max_consecutive_rejections": 0},
         ],
     )
     def test_invalid_values_raise(self, kwargs):
-        """Non-positive limits and inconsistent dt bounds are rejected."""
+        """Non-positive limits and inconsistent dt/rejection bounds are rejected."""
         with pytest.raises(ValueError):
             RateLimiterConfig(**kwargs)
+
+    def test_rejection_thresholds_accept_valid_values(self):
+        """Rejection thresholds at or above the clamp limits construct fine."""
+        RateLimiterConfig(
+            reject_linear_velocity=0.25,
+            reject_angular_velocity=1.5,
+            reject_joint_velocity=1.5,
+            max_consecutive_rejections=None,
+        )
 
 
 # ===========================================================================
@@ -500,3 +522,244 @@ class TestJointRateLimiter:
         _set_joint_input(r, inputs, [3.0] * 5)
         r.compute(inputs, outputs, _make_context(t_ns=10 * _NS))
         np.testing.assert_allclose(_read_joints(outputs, 5), [0.15] * 5, atol=1e-6)
+
+
+# ===========================================================================
+# Anomaly rejection (reject_* thresholds)
+# ===========================================================================
+
+
+class TestEePoseAnomalyRejection:
+    """Rejection tier of the EE-pose limiter: anomalous frames are not executed."""
+
+    def _limiter(self, **cfg_kwargs) -> EePoseRateLimiter:
+        cfg = RateLimiterConfig(
+            max_linear_velocity=0.25,
+            reject_linear_velocity=2.0,
+            reject_angular_velocity=10.0,
+            **cfg_kwargs,
+        )
+        return EePoseRateLimiter(name="ee_limiter", config=cfg)
+
+    def test_anomalous_position_jump_is_not_approached(self):
+        """A teleport beyond the reject envelope holds the pose entirely (no slew)."""
+        r = self._limiter()
+        inputs, outputs = _build_io(r)
+        _set_pose_input(r, inputs, [0.0, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        # 0.5 m in 20 ms = 25 m/s >> 2 m/s reject threshold: hold, do not creep.
+        _set_pose_input(r, inputs, [0.5, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=20_000_000))
+        np.testing.assert_allclose(_read_pose(outputs)[:3], [0.0, 0.0, 0.0], atol=1e-6)
+
+    def test_anomalous_orientation_flip_is_not_approached(self):
+        """An orientation teleport beyond the reject envelope holds entirely."""
+        r = self._limiter()
+        inputs, outputs = _build_io(r)
+        _set_pose_input(r, inputs, [0.2, 0.0, 0.1], _ID_QUAT)
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        # pi rad in 20 ms = ~157 rad/s >> 10 rad/s reject threshold.
+        tgt = _quat_xyzw([0, 0, 1], math.pi - 0.01)
+        _set_pose_input(r, inputs, [0.2, 0.0, 0.1], tgt)
+        r.compute(inputs, outputs, _make_context(t_ns=20_000_000))
+        emitted = _read_pose(outputs)[3:7]
+        assert _quat_angle(emitted, _ID_QUAT) == pytest.approx(0.0, abs=1e-6)
+
+    def test_fast_but_legal_motion_is_clamped_not_rejected(self):
+        """Motion between the clamp and reject thresholds is clamped, not refused."""
+        r = self._limiter()
+        inputs, outputs = _build_io(r)
+        _set_pose_input(r, inputs, [0.0, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        # 20 mm in 20 ms = 1 m/s: above the 0.25 m/s clamp, below the 2 m/s
+        # reject threshold -> the clamp band handles it (5 mm step).
+        _set_pose_input(r, inputs, [0.02, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=20_000_000))
+        np.testing.assert_allclose(
+            _read_pose(outputs)[:3], [0.005, 0.0, 0.0], atol=1e-6
+        )
+
+    def test_glitch_recovery_resumes_from_held_pose(self):
+        """After a one-frame teleport glitch, sane frames resume without a jump."""
+        r = self._limiter()
+        inputs, outputs = _build_io(r)
+        _set_pose_input(r, inputs, [0.1, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        # Glitch frame: rejected, held at 0.1.
+        _set_pose_input(r, inputs, [0.9, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=20_000_000))
+        np.testing.assert_allclose(_read_pose(outputs)[:3], [0.1, 0.0, 0.0], atol=1e-6)
+
+        # Recovery frame near the pre-glitch input: accepted, small step allowed.
+        _set_pose_input(r, inputs, [0.101, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=40_000_000))
+        np.testing.assert_allclose(
+            _read_pose(outputs)[:3], [0.101, 0.0, 0.0], atol=1e-6
+        )
+
+    def test_persistent_target_reaccepted_after_cap(self):
+        """After max_consecutive_rejections the far target is re-accepted, clamped."""
+        r = self._limiter(max_consecutive_rejections=3)
+        inputs, outputs = _build_io(r)
+        _set_pose_input(r, inputs, [0.0, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        # 3 rejected frames, then the 4th trips the cap and re-accepts.
+        for k in range(1, 4):
+            _set_pose_input(r, inputs, [0.5, 0.0, 0.0])
+            r.compute(inputs, outputs, _make_context(t_ns=k * 20_000_000))
+            np.testing.assert_allclose(
+                _read_pose(outputs)[:3], [0.0, 0.0, 0.0], atol=1e-6
+            )
+        _set_pose_input(r, inputs, [0.5, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=4 * 20_000_000))
+        pos = _read_pose(outputs)[:3]
+        # Re-accepted but still clamped: at most max_linear_velocity * max_dt.
+        assert 0.0 < pos[0] <= 0.25 * 0.1 + 1e-9
+
+    def test_cap_none_holds_indefinitely(self):
+        """With max_consecutive_rejections=None an anomalous stream never executes."""
+        r = self._limiter(max_consecutive_rejections=None)
+        inputs, outputs = _build_io(r)
+        _set_pose_input(r, inputs, [0.0, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        for k in range(1, 100):
+            _set_pose_input(r, inputs, [0.5, 0.0, 0.0])
+            r.compute(inputs, outputs, _make_context(t_ns=k * 20_000_000))
+            np.testing.assert_allclose(
+                _read_pose(outputs)[:3], [0.0, 0.0, 0.0], atol=1e-6
+            )
+
+    def test_reset_clears_rejection_state(self):
+        """A reset drops the rejection baseline: the next frame latches fresh."""
+        r = self._limiter()
+        inputs, outputs = _build_io(r)
+        _set_pose_input(r, inputs, [0.0, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        _set_pose_input(r, inputs, [0.9, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=20_000_000))  # rejected
+
+        # Reset: the same far pose is now a fresh episode's first frame.
+        _set_pose_input(r, inputs, [0.9, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(reset=True, t_ns=40_000_000))
+        np.testing.assert_allclose(_read_pose(outputs)[:3], [0.9, 0.0, 0.0], atol=1e-6)
+
+    def test_rejection_disabled_by_default(self):
+        """Without reject thresholds a teleport is clamped (legacy behavior), not refused."""
+        r = EePoseRateLimiter(
+            name="ee_limiter", config=RateLimiterConfig(max_linear_velocity=0.25)
+        )
+        inputs, outputs = _build_io(r)
+        _set_pose_input(r, inputs, [0.0, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        _set_pose_input(r, inputs, [0.5, 0.0, 0.0])
+        r.compute(inputs, outputs, _make_context(t_ns=20_000_000))
+        np.testing.assert_allclose(
+            _read_pose(outputs)[:3], [0.005, 0.0, 0.0], atol=1e-6
+        )
+
+
+class TestJointAnomalyRejection:
+    """Rejection tier of the joint limiter: anomalous frames are not executed."""
+
+    def _limiter(self, **cfg_kwargs) -> JointRateLimiter:
+        cfg = RateLimiterConfig(
+            max_joint_velocity=1.5,
+            reject_joint_velocity=15.0,
+            **cfg_kwargs,
+        )
+        return JointRateLimiter(name="joint_limiter", joint_names=_JOINTS, config=cfg)
+
+    def test_anomalous_flip_is_not_approached(self):
+        """An IK-divergence-sized flip (>> reject threshold) holds all joints."""
+        r = self._limiter()
+        inputs, outputs = _build_io(r)
+        _set_joint_input(r, inputs, [0.0] * 5)
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        # ~100 deg (1.75 rad) in 20 ms = 87 rad/s >> 15 rad/s: refuse outright.
+        _set_joint_input(r, inputs, [1.75] * 5)
+        r.compute(inputs, outputs, _make_context(t_ns=20_000_000))
+        np.testing.assert_allclose(_read_joints(outputs, 5), [0.0] * 5, atol=1e-6)
+
+    def test_single_bad_joint_rejects_whole_frame(self):
+        """One joint over the reject threshold refuses the whole frame."""
+        r = self._limiter()
+        inputs, outputs = _build_io(r)
+        _set_joint_input(r, inputs, [0.0] * 5)
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        # Joints move together: executing the sane joints of an insane frame
+        # still produces an insane configuration.
+        _set_joint_input(r, inputs, [0.01, 0.01, 1.75, 0.01, 0.01])
+        r.compute(inputs, outputs, _make_context(t_ns=20_000_000))
+        np.testing.assert_allclose(_read_joints(outputs, 5), [0.0] * 5, atol=1e-6)
+
+    def test_fast_but_legal_motion_is_clamped_not_rejected(self):
+        """Motion between the clamp and reject thresholds is clamped, not refused."""
+        r = self._limiter()
+        inputs, outputs = _build_io(r)
+        _set_joint_input(r, inputs, [0.0] * 5)
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        # 0.1 rad in 20 ms = 5 rad/s: above the 1.5 rad/s clamp, below the
+        # 15 rad/s reject threshold -> clamped to 0.03 rad.
+        _set_joint_input(r, inputs, [0.1] * 5)
+        r.compute(inputs, outputs, _make_context(t_ns=20_000_000))
+        np.testing.assert_allclose(_read_joints(outputs, 5), [0.03] * 5, atol=1e-6)
+
+    def test_glitch_recovery_resumes_from_held_targets(self):
+        """After a one-frame glitch, sane frames resume without a jump."""
+        r = self._limiter()
+        inputs, outputs = _build_io(r)
+        _set_joint_input(r, inputs, [0.1] * 5)
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        _set_joint_input(r, inputs, [1.75] * 5)  # glitch: rejected
+        r.compute(inputs, outputs, _make_context(t_ns=20_000_000))
+        np.testing.assert_allclose(_read_joints(outputs, 5), [0.1] * 5, atol=1e-6)
+
+        _set_joint_input(r, inputs, [0.11] * 5)  # recovery: accepted
+        r.compute(inputs, outputs, _make_context(t_ns=40_000_000))
+        np.testing.assert_allclose(_read_joints(outputs, 5), [0.11] * 5, atol=1e-6)
+
+    def test_persistent_target_reaccepted_after_cap(self):
+        """After max_consecutive_rejections the far target is re-accepted, clamped."""
+        r = self._limiter(max_consecutive_rejections=2)
+        inputs, outputs = _build_io(r)
+        _set_joint_input(r, inputs, [0.0] * 5)
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        for k in range(1, 3):
+            _set_joint_input(r, inputs, [1.75] * 5)
+            r.compute(inputs, outputs, _make_context(t_ns=k * 20_000_000))
+            np.testing.assert_allclose(_read_joints(outputs, 5), [0.0] * 5, atol=1e-6)
+
+        _set_joint_input(r, inputs, [1.75] * 5)
+        r.compute(inputs, outputs, _make_context(t_ns=3 * 20_000_000))
+        joints = _read_joints(outputs, 5)
+        # Re-accepted but still clamped: at most max_joint_velocity * max_dt.
+        assert np.all(joints > 0.0)
+        assert np.all(joints <= 1.5 * 0.1 + 1e-9)
+
+    def test_rejection_disabled_by_default(self):
+        """Without reject_joint_velocity a flip is clamped (legacy behavior)."""
+        r = JointRateLimiter(
+            name="joint_limiter",
+            joint_names=_JOINTS,
+            config=RateLimiterConfig(max_joint_velocity=1.5),
+        )
+        inputs, outputs = _build_io(r)
+        _set_joint_input(r, inputs, [0.0] * 5)
+        r.compute(inputs, outputs, _make_context(t_ns=0))
+
+        _set_joint_input(r, inputs, [1.75] * 5)
+        r.compute(inputs, outputs, _make_context(t_ns=20_000_000))
+        np.testing.assert_allclose(_read_joints(outputs, 5), [0.03] * 5, atol=1e-6)
