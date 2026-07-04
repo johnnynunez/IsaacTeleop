@@ -435,6 +435,11 @@ class JointRateLimiter(BaseRetargeter):
             return
 
         targets = np.array([float(jin[i]) for i in range(n)], dtype=np.float64)
+        if not np.all(np.isfinite(targets)):
+            if self._last_targets is not None:
+                for i in range(n):
+                    out[i] = float(self._last_targets[i])
+            return
 
         if self._last_targets is None:
             # First valid frame: pass through, latch the baseline.
