@@ -118,16 +118,23 @@ class RateLimiterConfig:
     min_dt: float = 1e-4
 
     def __post_init__(self) -> None:
-        if self.max_linear_velocity <= 0.0:
-            raise ValueError("max_linear_velocity must be > 0")
-        if self.max_angular_velocity <= 0.0:
-            raise ValueError("max_angular_velocity must be > 0")
-        if self.max_joint_velocity <= 0.0:
-            raise ValueError("max_joint_velocity must be > 0")
+        for field_name in (
+            "max_linear_velocity",
+            "max_angular_velocity",
+            "max_joint_velocity",
+            "nominal_dt",
+            "max_dt",
+            "min_dt",
+        ):
+            value = getattr(self, field_name)
+            if not np.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{field_name} must be finite and > 0")
         for name, limit in self.joint_velocity_overrides.items():
-            if limit <= 0.0:
-                raise ValueError(f"joint_velocity_overrides[{name!r}] must be > 0")
-        if not 0.0 < self.min_dt <= self.nominal_dt <= self.max_dt:
+            if not np.isfinite(limit) or limit <= 0.0:
+                raise ValueError(
+                    f"joint_velocity_overrides[{name!r}] must be finite and > 0"
+                )
+        if not self.min_dt <= self.nominal_dt <= self.max_dt:
             raise ValueError("require 0 < min_dt <= nominal_dt <= max_dt")
 
 
